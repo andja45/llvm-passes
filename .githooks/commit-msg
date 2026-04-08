@@ -1,0 +1,24 @@
+#!/bin/sh
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+if echo "$COMMIT_MSG" | grep -q "^Merge "; then
+  exit 0
+fi
+
+PATTERN="^(feat|fix|refactor|perf|style|docs|test|build|chore)\([a-zA-Z0-9_-]+\): .{5,}$"
+
+if ! echo "$COMMIT_MSG" | grep -qE "$PATTERN"; then
+  echo ""
+  echo "Expected format:"
+  echo "  <type>(<scope>): <description>"
+  echo ""
+  echo "Allowed types:"
+  echo "  feat fix refactor perf style docs test build chore"
+  echo ""
+  echo "Commit aborted."
+  exit 1
+fi
+
+exit 0
