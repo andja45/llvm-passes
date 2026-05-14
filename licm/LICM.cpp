@@ -25,7 +25,7 @@ static bool isLoopInvariant(Value *V, Loop &L) {
         return true;
     // covers values defined inside the loop whose operands are loop invariant
     auto *I = dyn_cast<Instruction>(V);
-    if (!I)
+    if (!I || isa<PHINode>(I))
         return false;
     for (Value *Op : I->operands())
         if (!isLoopInvariant(Op, L))
@@ -45,19 +45,20 @@ static void collectLoopStoresAndCalls(Loop &L, SmallVector<StoreInst *, 8> &Stor
 }
 
 static bool isSafeToHoist(Instruction &I, Loop &L, DominatorTree &DT) {
+    if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I)) return false;
+
     for (Value *Op : I.operands())
         if (!isLoopInvariant(Op, L))
             return false;
 
-    if (!isSafeToSpeculativelyExecute(&I)) // rejects divisions and loads from potentially invalid pointers
-        return false;
-
-    // if instruction doesn't dominate all exits hoisting would change semantics
-    SmallVector<BasicBlock *, 8> ExitBlocks;
-    L.getExitBlocks(ExitBlocks);
-    for (BasicBlock *EB : ExitBlocks)
-        if (!DT.dominates(I.getParent(), EB))
-            return false;
+    // unsafe instructions require dominating all exits which ensures no new execution is introduced
+    if (!isSafeToSpeculativelyExecute(&I)) {
+        SmallVector<BasicBlock *, 8> ExitBlocks;
+        L.getExitBlocks(ExitBlocks);
+        for (BasicBlock *EB : ExitBlocks)
+            if (!DT.dominates(I.getParent(), EB))
+                return false;
+    }
 
     return true;
 }
