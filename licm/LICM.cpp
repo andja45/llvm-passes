@@ -25,7 +25,7 @@ static bool isLoopInvariant(Value *V, Loop &L) {
         return true;
     // covers values defined inside the loop whose operands are loop invariant
     auto *I = dyn_cast<Instruction>(V);
-    if (!I || isa<PHINode>(I))
+    if (!I || isa<PHINode>(I) || isa<CallBase>(I))
         return false;
     for (Value *Op : I->operands())
         if (!isLoopInvariant(Op, L))
@@ -44,8 +44,28 @@ static void collectLoopStoresAndCalls(Loop &L, SmallVector<StoreInst *, 8> &Stor
         }
 }
 
+static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA,
+                         ArrayRef<StoreInst *> LoopStores) {
+    if (!CB.getCalledFunction())  return false; // function pointer
+    if (CB.isInlineAsm())         return false;
+    if (CB.isConvergent())        return false; // GPU thread-sensitive
+    if (!CB.doesNotThrow())       return false;
+    if (!CB.onlyReadsMemory())    return false;
+
+    for (Value *Arg : CB.args())
+        if (!isLoopInvariant(Arg, L))
+            return false;
+
+    // readonly call is unsafe if a loop store writes to memory the call reads
+    for (StoreInst *SI : LoopStores)
+        if (AA.getModRefInfo(&CB, MemoryLocation::get(SI)) != ModRefInfo::NoModRef)
+            return false;
+
+    return true;
+}
+
 static bool isSafeToHoist(Instruction &I, Loop &L, DominatorTree &DT) {
-    if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I)) return false;
+    if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I) || isa<CallBase>(I)) return false;
 
     for (Value *Op : I.operands())
         if (!isLoopInvariant(Op, L))
@@ -93,9 +113,14 @@ struct LICMPass : PassInfoMixin<LICMPass> {
         bool Changed = false;
         for (BasicBlock *BB : L.getBlocks()) {
             SmallVector<Instruction *, 8> ToHoist;
-            for (Instruction &I : *BB)
-                if (isSafeToHoist(I, L, AR.DT))
+            for (Instruction &I : *BB) {
+                if (auto *CB = dyn_cast<CallBase>(&I)) {
+                    if (canHoistCall(*CB, L, AR.AA, LoopStores))
+                        ToHoist.push_back(&I);
+                } else if (isSafeToHoist(I, L, AR.DT)) {
                     ToHoist.push_back(&I);
+                }
+            }
 
             for (Instruction *I : ToHoist) {
                 hoistInstruction(*I, Preheader);
