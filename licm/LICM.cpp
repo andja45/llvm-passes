@@ -1,5 +1,10 @@
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -15,6 +20,54 @@ STATISTIC(NumHoisted, "Number of instructions hoisted out of loops");
 STATISTIC(NumSunk, "Number of instructions sunk out of loops");
 STATISTIC(NumPromoted, "Number of memory locations promoted to registers");
 
+static bool isLoopInvariant(Value *V, Loop &L) {
+    if (L.isLoopInvariant(V)) // covers constants and values defined outside the loop
+        return true;
+    // covers values defined inside the loop whose operands are loop invariant
+    auto *I = dyn_cast<Instruction>(V);
+    if (!I)
+        return false;
+    for (Value *Op : I->operands())
+        if (!isLoopInvariant(Op, L))
+            return false;
+    return true;
+}
+
+// avoids O(n²) rescanning per hoisting candidate, collects beforehand in O(n)
+static void collectLoopStoresAndCalls(Loop &L, SmallVector<StoreInst *, 8> &Stores, SmallVector<CallBase *, 8> &Calls) {
+    for (BasicBlock *BB : L.blocks())
+        for (Instruction &I : *BB) {
+            if (auto *SI = dyn_cast<StoreInst>(&I))
+                Stores.push_back(SI);
+            else if (auto *CB = dyn_cast<CallBase>(&I))
+                Calls.push_back(CB);
+        }
+}
+
+static bool isSafeToHoist(Instruction &I, Loop &L, DominatorTree &DT) {
+    for (Value *Op : I.operands())
+        if (!isLoopInvariant(Op, L))
+            return false;
+
+    if (!isSafeToSpeculativelyExecute(&I)) // rejects divisions and loads from potentially invalid pointers
+        return false;
+
+    // if instruction doesn't dominate all exits hoisting would change semantics
+    SmallVector<BasicBlock *, 8> ExitBlocks;
+    L.getExitBlocks(ExitBlocks);
+    for (BasicBlock *EB : ExitBlocks)
+        if (!DT.dominates(I.getParent(), EB))
+            return false;
+
+    return true;
+}
+
+static void hoistInstruction(Instruction &I, BasicBlock *Preheader) {
+    I.moveBefore(Preheader->getTerminator());
+    ++NumHoisted;
+    LLVM_DEBUG(dbgs() << "[licm] hoisted: " << I << "\n");
+}
+
 static BasicBlock *ensurePreheader(Loop &L, DominatorTree &DT, LoopInfo &LI) {
     if (BasicBlock *PH = L.getLoopPreheader())
         return PH;
@@ -24,8 +77,7 @@ static BasicBlock *ensurePreheader(Loop &L, DominatorTree &DT, LoopInfo &LI) {
 struct LICMPass : PassInfoMixin<LICMPass> {
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM,
                           LoopStandardAnalysisResults &AR, LPMUpdater &U) {
-        LLVM_DEBUG(dbgs() << "[licm] running on loop: "
-                          << L.getName() << "\n");
+        LLVM_DEBUG(dbgs() << "[licm] running on loop: " << L.getName() << "\n");
 
         BasicBlock *Preheader = ensurePreheader(L, AR.DT, AR.LI);
         if (!Preheader) {
@@ -33,7 +85,24 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             return PreservedAnalyses::all();
         }
 
-        return PreservedAnalyses::all();
+        SmallVector<StoreInst *, 8> LoopStores;
+        SmallVector<CallBase *, 8> LoopCalls;
+        collectLoopStoresAndCalls(L, LoopStores, LoopCalls);
+
+        bool Changed = false;
+        for (BasicBlock *BB : L.getBlocks()) {
+            SmallVector<Instruction *, 8> ToHoist;
+            for (Instruction &I : *BB)
+                if (isSafeToHoist(I, L, AR.DT))
+                    ToHoist.push_back(&I);
+
+            for (Instruction *I : ToHoist) {
+                hoistInstruction(*I, Preheader);
+                Changed = true;
+            }
+        }
+
+        return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
     }
 };
 
