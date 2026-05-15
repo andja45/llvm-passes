@@ -25,7 +25,7 @@ static bool isLoopInvariant(Value *V, Loop &L) {
         return true;
     // covers values defined inside the loop whose operands are loop invariant
     auto *I = dyn_cast<Instruction>(V);
-    if (!I || isa<PHINode>(I) || isa<CallBase>(I))
+    if (!I || isa<PHINode>(I) || isa<CallBase>(I)) // calls need safety checks beyond operand invariance
         return false;
     for (Value *Op : I->operands())
         if (!isLoopInvariant(Op, L))
@@ -34,18 +34,17 @@ static bool isLoopInvariant(Value *V, Loop &L) {
 }
 
 // avoids O(n²) rescanning per hoisting candidate, collects beforehand in O(n)
-static void collectLoopStoresAndCalls(Loop &L, SmallVector<StoreInst *, 8> &Stores, SmallVector<CallBase *, 8> &Calls) {
+static void collectLoopStoresAndCalls(Loop &L, SmallVector<StoreInst*, 8> &LoopStores, SmallVector<CallBase*, 8> &LoopCalls) {
     for (BasicBlock *BB : L.blocks())
         for (Instruction &I : *BB) {
             if (auto *SI = dyn_cast<StoreInst>(&I))
-                Stores.push_back(SI);
+                LoopStores.push_back(SI);
             else if (auto *CB = dyn_cast<CallBase>(&I))
-                Calls.push_back(CB);
+                LoopCalls.push_back(CB);
         }
 }
 
-static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA,
-                         ArrayRef<StoreInst *> LoopStores) {
+static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA, ArrayRef<StoreInst*> LoopStores) {
     if (!CB.getCalledFunction())  return false; // function pointer
     if (CB.isInlineAsm())         return false;
     if (CB.isConvergent())        return false; // GPU thread-sensitive
@@ -59,6 +58,25 @@ static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA,
     // readonly call is unsafe if a loop store writes to memory the call reads
     for (StoreInst *SI : LoopStores)
         if (AA.getModRefInfo(&CB, MemoryLocation::get(SI)) != ModRefInfo::NoModRef)
+            return false;
+
+    return true;
+}
+
+static bool canHoistLoad(LoadInst &LI, Loop &L, AAResults &AA, ArrayRef<StoreInst*> LoopStores, ArrayRef<CallBase*> LoopCalls) {
+    if (LI.isVolatile()) return false;
+    if (LI.isAtomic())   return false;
+
+    if (!isLoopInvariant(LI.getPointerOperand(), L)) return false;
+
+    MemoryLocation Loc = MemoryLocation::get(&LI);
+
+    for (StoreInst *SI : LoopStores)
+        if (AA.alias(Loc, MemoryLocation::get(SI)) != AliasResult::NoAlias)
+            return false;
+
+    for (CallBase *CB : LoopCalls)
+        if (AA.getModRefInfo(CB, Loc) != ModRefInfo::NoModRef)
             return false;
 
     return true;
@@ -106,15 +124,18 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             return PreservedAnalyses::all();
         }
 
-        SmallVector<StoreInst *, 8> LoopStores;
-        SmallVector<CallBase *, 8> LoopCalls;
+        SmallVector<StoreInst*, 8> LoopStores;
+        SmallVector<CallBase*, 8> LoopCalls;
         collectLoopStoresAndCalls(L, LoopStores, LoopCalls);
 
         bool Changed = false;
         for (BasicBlock *BB : L.getBlocks()) {
-            SmallVector<Instruction *, 8> ToHoist;
+            SmallVector<Instruction*, 8> ToHoist;
             for (Instruction &I : *BB) {
-                if (auto *CB = dyn_cast<CallBase>(&I)) {
+                if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                    if (canHoistLoad(*LI, L, AR.AA, LoopStores, LoopCalls))
+                        ToHoist.push_back(&I);
+                } else if (auto *CB = dyn_cast<CallBase>(&I)) {
                     if (canHoistCall(*CB, L, AR.AA, LoopStores))
                         ToHoist.push_back(&I);
                 } else if (isSafeToHoist(I, L, AR.DT)) {
