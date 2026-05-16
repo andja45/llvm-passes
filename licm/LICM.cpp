@@ -233,6 +233,9 @@ struct LICMPass : PassInfoMixin<LICMPass> {
 
         Changed |= tryPromoteMemory(L, AR.AA, Preheader, LoopLoads, LoopStores, LoopCalls);
 
+        // fix LCSSA after all transformations (exit PHIs mark where loop-internal values leave the loop)
+        formLCSSARecursively(L, AR.DT, &AR.LI, &AR.SE);
+
         return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
     }
 };
