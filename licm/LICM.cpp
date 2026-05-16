@@ -195,6 +195,41 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, Arra
     return Changed;
 }
 
+static bool trySink(Loop &L) {
+    // single exit only (multiple exits mean users could be spread across them)
+    BasicBlock *ExitBlock = L.getExitBlock();
+    if (!ExitBlock) return false;
+
+    SmallVector<Instruction*, 8> ToSink;
+
+    for (BasicBlock *BB : L.blocks()) {
+        for (Instruction &I : *BB) {
+            if (I.isTerminator() || isa<PHINode>(I)) continue;
+            if (!isSafeToSpeculativelyExecute(&I)) continue;
+
+            bool CanSink = true;
+            for (User *U : I.users()) {
+                // if any user is still inside the loop, can't sink
+                if (L.contains(cast<Instruction>(U)->getParent()))
+                { CanSink = false; break; }
+            }
+
+            if (CanSink) ToSink.push_back(&I);
+        }
+    }
+
+    bool Changed = false;
+
+    for (Instruction *I : ToSink) {
+        I->moveBefore(&*ExitBlock->getFirstInsertionPt());
+        ++NumSunk;
+        LLVM_DEBUG(dbgs() << "[licm] sunk: " << I << "\n");
+        Changed = true;
+    }
+
+    return Changed;
+}
+
 struct LICMPass : PassInfoMixin<LICMPass> {
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM, LoopStandardAnalysisResults &AR, LPMUpdater &U) {
         LLVM_DEBUG(dbgs() << "[licm] running on loop: " << L.getName() << "\n");
@@ -232,6 +267,7 @@ struct LICMPass : PassInfoMixin<LICMPass> {
         }
 
         Changed |= tryPromoteMemory(L, AR.AA, Preheader, LoopLoads, LoopStores, LoopCalls);
+        Changed |= trySink(L);
 
         // fix LCSSA after all transformations (exit PHIs mark where loop-internal values leave the loop)
         formLCSSARecursively(L, AR.DT, &AR.LI, &AR.SE);
