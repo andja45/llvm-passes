@@ -1,25 +1,27 @@
-; ModuleID = '/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes-project/examples/licm/hoist_promotion//original.ll'
-source_filename = "/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes-project/examples/licm/hoist_promotion//input.c"
+; ModuleID = '/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes-project/examples/licm/hoist_reciprocal//original.ll'
+source_filename = "/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes-project/examples/licm/hoist_reciprocal//input.c"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
 
 ; Function Attrs: noinline nounwind uwtable
-define dso_local void @accumulate(ptr noalias noundef %arr, i32 noundef %n, ptr noalias noundef %total) #0 {
+define dso_local void @normalize(ptr noalias noundef %arr, i32 noundef %n, float noundef %scale) #0 {
 entry:
-  %promoted.init = load i32, ptr %total, align 4
+  %recip = fdiv float 1.000000e+00, %scale
   br label %for.cond
 
 for.cond:                                         ; preds = %for.inc, %entry
-  %promoted = phi i32 [ %promoted.init, %entry ], [ %add, %for.inc ]
   %i.0 = phi i32 [ 0, %entry ], [ %inc, %for.inc ]
   %cmp = icmp slt i32 %i.0, %n
   br i1 %cmp, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond
   %idxprom = sext i32 %i.0 to i64
-  %arrayidx = getelementptr inbounds i32, ptr %arr, i64 %idxprom
-  %0 = load i32, ptr %arrayidx, align 4
-  %add = add nsw i32 %promoted, %0
+  %arrayidx = getelementptr inbounds float, ptr %arr, i64 %idxprom
+  %0 = load float, ptr %arrayidx, align 4
+  %recip.mul = fmul float %0, %recip
+  %idxprom1 = sext i32 %i.0 to i64
+  %arrayidx2 = getelementptr inbounds float, ptr %arr, i64 %idxprom1
+  store float %recip.mul, ptr %arrayidx2, align 4
   br label %for.inc
 
 for.inc:                                          ; preds = %for.body
@@ -27,8 +29,6 @@ for.inc:                                          ; preds = %for.body
   br label %for.cond, !llvm.loop !6
 
 for.end:                                          ; preds = %for.cond
-  %promoted.lcssa = phi i32 [ %promoted, %for.cond ]
-  store i32 %promoted.lcssa, ptr %total, align 4
   ret void
 }
 
