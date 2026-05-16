@@ -11,6 +11,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
+#include "llvm/IR/IRBuilder.h"
 
 #define DEBUG_TYPE "licm"
 
@@ -34,10 +35,13 @@ static bool isLoopInvariant(Value *V, Loop &L) {
 }
 
 // avoids O(n²) rescanning per hoisting candidate, collects beforehand in O(n)
-static void collectLoopStoresAndCalls(Loop &L, SmallVector<StoreInst*, 8> &LoopStores, SmallVector<CallBase*, 8> &LoopCalls) {
+static void collectLoopMemoryOps(Loop &L, SmallVector<LoadInst*, 8> &LoopLoads, SmallVector<StoreInst*, 8> &LoopStores,
+                                 SmallVector<CallBase*, 8> &LoopCalls) {
     for (BasicBlock *BB : L.blocks())
         for (Instruction &I : *BB) {
-            if (auto *SI = dyn_cast<StoreInst>(&I))
+            if (auto *LI = dyn_cast<LoadInst>(&I))
+                LoopLoads.push_back(LI);
+            else if (auto *SI = dyn_cast<StoreInst>(&I))
                 LoopStores.push_back(SI);
             else if (auto *CB = dyn_cast<CallBase>(&I))
                 LoopCalls.push_back(CB);
@@ -113,9 +117,86 @@ static BasicBlock *ensurePreheader(Loop &L, DominatorTree &DT, LoopInfo &LI) {
     return InsertPreheaderForLoop(&L, &DT, &LI, nullptr, false);
 }
 
+static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, ArrayRef<LoadInst*> LoopLoads,
+                             ArrayRef<StoreInst*> LoopStores, ArrayRef<CallBase*> LoopCalls) {
+    // single exit only (one place to write the promoted value back after the loop)
+    BasicBlock *ExitBlock = L.getExitBlock();
+    if (!ExitBlock) return false;
+
+    // block that jumps back to the header (for.inc in a for loop)
+    BasicBlock *Latch = L.getLoopLatch();
+    if (!Latch) return false;
+
+    SmallDenseMap<Value*, SmallVector<LoadInst*, 2>> LoadsByPtr;
+    SmallDenseMap<Value*, SmallVector<StoreInst*, 2>> StoresByPtr;
+
+    for (LoadInst *LI : LoopLoads)
+        if (!LI->isVolatile() && !LI->isAtomic() &&
+            isLoopInvariant(LI->getPointerOperand(), L))
+            LoadsByPtr[LI->getPointerOperand()].push_back(LI);
+
+    for (StoreInst *SI : LoopStores)
+        if (!SI->isVolatile() && !SI->isAtomic() &&
+            isLoopInvariant(SI->getPointerOperand(), L))
+            StoresByPtr[SI->getPointerOperand()].push_back(SI);
+
+    bool Changed = false;
+
+    for (auto &[Ptr, PtrLoads] : LoadsByPtr) {
+        auto It = StoresByPtr.find(Ptr);
+        if (It == StoresByPtr.end()) continue; // no store (hoisting, not promotion)
+        if (It->second.size() != 1) continue; // multiple stores to same address, too complex to promote safely
+
+        StoreInst *StoreToPromote = It->second[0];
+
+        // verify no other store or call in the loop aliases this address
+        MemoryLocation Loc = MemoryLocation::getBeforeOrAfter(Ptr);
+        bool Safe = true;
+        for (StoreInst *SI : LoopStores) {
+            if (SI == StoreToPromote) continue;
+            if (AA.alias(Loc, MemoryLocation::get(SI)) != AliasResult::NoAlias)
+                { Safe = false; break; }
+        }
+        for (CallBase *CB : LoopCalls) {
+            if (AA.getModRefInfo(CB, Loc) != ModRefInfo::NoModRef)
+                { Safe = false; break; }
+        }
+        if (!Safe) continue;
+
+        Type *Ty = StoreToPromote->getValueOperand()->getType();
+
+        // load initial value once before the loop starts
+        IRBuilder<> PreB(Preheader->getTerminator());
+        Value *InitVal = PreB.CreateLoad(Ty, Ptr, "promoted.init");
+
+        // PHI at loop header - first iteration uses InitVal, subsequent iterations use last stored value
+        IRBuilder<> HdrB(&*L.getHeader()->begin());
+        PHINode *PN = HdrB.CreatePHI(Ty, 2, "promoted");
+        PN->addIncoming(InitVal, Preheader);
+        PN->addIncoming(StoreToPromote->getValueOperand(), Latch);
+
+        // replace all loads with the PHI (no memory reads inside the loop)
+        for (LoadInst *LI : PtrLoads) {
+            LI->replaceAllUsesWith(PN);
+            LI->eraseFromParent();
+        }
+
+        // store removed (PHI carries the value across iterations)
+        StoreToPromote->eraseFromParent();
+
+        // write final register value back to memory once at loop exit
+        IRBuilder<> ExitB(&*ExitBlock->getFirstInsertionPt());
+        ExitB.CreateStore(PN, Ptr);
+
+        ++NumPromoted;
+        Changed = true;
+    }
+
+    return Changed;
+}
+
 struct LICMPass : PassInfoMixin<LICMPass> {
-    PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM,
-                          LoopStandardAnalysisResults &AR, LPMUpdater &U) {
+    PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM, LoopStandardAnalysisResults &AR, LPMUpdater &U) {
         LLVM_DEBUG(dbgs() << "[licm] running on loop: " << L.getName() << "\n");
 
         BasicBlock *Preheader = ensurePreheader(L, AR.DT, AR.LI);
@@ -124,9 +205,10 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             return PreservedAnalyses::all();
         }
 
+        SmallVector<LoadInst*, 8> LoopLoads;
         SmallVector<StoreInst*, 8> LoopStores;
         SmallVector<CallBase*, 8> LoopCalls;
-        collectLoopStoresAndCalls(L, LoopStores, LoopCalls);
+        collectLoopMemoryOps(L, LoopLoads, LoopStores, LoopCalls);
 
         bool Changed = false;
         for (BasicBlock *BB : L.getBlocks()) {
@@ -148,6 +230,8 @@ struct LICMPass : PassInfoMixin<LICMPass> {
                 Changed = true;
             }
         }
+
+        Changed |= tryPromoteMemory(L, AR.AA, Preheader, LoopLoads, LoopStores, LoopCalls);
 
         return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
     }

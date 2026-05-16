@@ -15,7 +15,7 @@ generate_cfg() {
     opt -passes=dot-cfg -disable-output "$input" 2>/dev/null
     for DOT in .*.dot; do
         [ -f "$DOT" ] || continue
-        CLEAN="${DOT#.}"  # strip leading dot — .transform.dot → transform.dot
+        CLEAN="${DOT#.}"
         mv "$DOT" "$CLEAN"
         dot -Tpng -Gdpi=150 -Nfontsize=11 "$CLEAN" -o "$output"
         rm "$CLEAN"
