@@ -11,6 +11,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 
 #define DEBUG_TYPE "licm"
@@ -34,7 +35,7 @@ static bool isLoopInvariant(Value *V, Loop &L) {
     return true;
 }
 
-// avoids O(n²) rescanning per hoisting candidate, collects beforehand in O(n)
+// avoids O(n^2) rescanning per hoisting candidate, collects beforehand in O(n)
 static void collectLoopMemoryOps(Loop &L, SmallVector<LoadInst*, 8> &LoopLoads, SmallVector<StoreInst*, 8> &LoopStores,
                                  SmallVector<CallBase*, 8> &LoopCalls) {
     for (BasicBlock *BB : L.blocks())
@@ -195,6 +196,45 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, Arra
     return Changed;
 }
 
+static bool tryHoistReciprocal(Loop &L, BasicBlock *Preheader) {
+    SmallVector<BinaryOperator*, 8> FDivs;
+
+    for (BasicBlock *BB : L.blocks()) {
+        for (Instruction &I : *BB) {
+            // only for fdiv (for integer sdiv/udiv x/c = x*(1/c) doesn't hold due to truncation)
+            auto *FDiv = dyn_cast<BinaryOperator>(&I);
+            if (!FDiv || FDiv->getOpcode() != Instruction::FDiv) continue;
+
+            if (!isLoopInvariant(FDiv->getOperand(1), L)) continue; // condition for reciprocal invariance
+            if (isLoopInvariant(FDiv->getOperand(0), L))  continue; // both invariant (regular hoisting handles it)
+
+            FDivs.push_back(FDiv);
+        }
+    }
+
+    bool Changed = false;
+
+    for (BinaryOperator *FDiv : FDivs) {
+        Value *Dividend = FDiv->getOperand(0);
+        Value *Divisor  = FDiv->getOperand(1);
+
+        // compute 1.0/divisor once in the preheader (one division for the whole loop)
+        IRBuilder<> B(Preheader->getTerminator());
+        Value *Recip = B.CreateFDiv(ConstantFP::get(Divisor->getType(), 1.0), Divisor, "recip");
+
+        // new fmul replaces fdiv in place (fmul throughput is up to 40x higher than fdiv)
+        Value *FMul = BinaryOperator::CreateFMul(Dividend, Recip, "recip.mul", FDiv);
+        FDiv->replaceAllUsesWith(FMul);
+        FDiv->eraseFromParent();
+
+        ++NumHoisted;
+        LLVM_DEBUG(dbgs() << "[licm] reciprocal hoisted: " << *FMul << "\n");
+        Changed = true;
+    }
+
+    return Changed;
+}
+
 static bool trySink(Loop &L) {
     // single exit only (multiple exits mean users could be spread across them)
     BasicBlock *ExitBlock = L.getExitBlock();
@@ -266,6 +306,7 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             }
         }
 
+        Changed |= tryHoistReciprocal(L, Preheader);
         Changed |= tryPromoteMemory(L, AR.AA, Preheader, LoopLoads, LoopStores, LoopCalls);
         Changed |= trySink(L);
 
