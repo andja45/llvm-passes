@@ -1,9 +1,13 @@
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -11,8 +15,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/IRBuilder.h"
 
 #define DEBUG_TYPE "licm"
 
@@ -21,6 +23,8 @@ using namespace llvm;
 STATISTIC(NumHoisted, "Number of instructions hoisted out of loops");
 STATISTIC(NumSunk, "Number of instructions sunk out of loops");
 STATISTIC(NumPromoted, "Number of memory locations promoted to registers");
+STATISTIC(NumSEHoisted, "Number of SE-unlocked instructions hoisted out of loops");
+STATISTIC(NumSESunk, "Number of SE-unlocked instructions sunk to loop exits");
 
 static bool isLoopInvariant(Value *V, Loop &L) {
     if (L.isLoopInvariant(V)) // covers constants and values defined outside the loop
@@ -49,7 +53,7 @@ static void collectLoopMemoryOps(Loop &L, SmallVector<LoadInst*, 8> &LoopLoads, 
         }
 }
 
-static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA, ArrayRef<StoreInst*> LoopStores) {
+static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA, ArrayRef<StoreInst*> LoopStores, ArrayRef<CallBase*> LoopCalls) {
     if (!CB.getCalledFunction())  return false; // function pointer
     if (CB.isInlineAsm())         return false;
     if (CB.isConvergent())        return false; // GPU thread-sensitive
@@ -64,6 +68,14 @@ static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA, ArrayRef<StoreIns
     for (StoreInst *SI : LoopStores)
         if (AA.getModRefInfo(&CB, MemoryLocation::get(SI)) != ModRefInfo::NoModRef)
             return false;
+
+    // readonly call is also unsafe if another call in the loop writes to memory the call reads
+    for (CallBase *Other : LoopCalls) {
+        if (Other == &CB) continue;
+        if (!Other->mayWriteToMemory()) continue;
+        if (isModSet(AA.getModRefInfo(Other, &CB))) // checks if Other writes to any location read by CB
+            return false;
+    }
 
     return true;
 }
@@ -81,14 +93,15 @@ static bool canHoistLoad(LoadInst &LI, Loop &L, AAResults &AA, ArrayRef<StoreIns
             return false;
 
     for (CallBase *CB : LoopCalls)
-        if (AA.getModRefInfo(CB, Loc) != ModRefInfo::NoModRef)
+        if (isModSet(AA.getModRefInfo(CB, Loc))) // checks if CB writes to any location read by LI
             return false;
 
     return true;
 }
 
 static bool isSafeToHoist(Instruction &I, Loop &L, DominatorTree &DT) {
-    if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I) || isa<CallBase>(I)) return false;
+    if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I) || isa<StoreInst>(I) || isa<CallBase>(I))
+        return false;
 
     for (Value *Op : I.operands())
         if (!isLoopInvariant(Op, L))
@@ -118,7 +131,7 @@ static BasicBlock *ensurePreheader(Loop &L, DominatorTree &DT, LoopInfo &LI) {
     return InsertPreheaderForLoop(&L, &DT, &LI, nullptr, false);
 }
 
-static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, ArrayRef<LoadInst*> LoopLoads,
+static bool tryPromoteMemory(Loop &L, AAResults &AA, DominatorTree &DT, BasicBlock *Preheader, ArrayRef<LoadInst*> LoopLoads,
                              ArrayRef<StoreInst*> LoopStores, ArrayRef<CallBase*> LoopCalls) {
     // single exit only (one place to write the promoted value back after the loop)
     BasicBlock *ExitBlock = L.getExitBlock();
@@ -143,12 +156,18 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, Arra
 
     bool Changed = false;
 
+    // single loop exit, single store per pointer, store block dominates latch
+    // these three invariants together guarantee the PHI is correct and the final store reaches memory exactly once
     for (auto &[Ptr, PtrLoads] : LoadsByPtr) {
         auto It = StoresByPtr.find(Ptr);
         if (It == StoresByPtr.end()) continue; // no store (hoisting, not promotion)
         if (It->second.size() != 1) continue; // multiple stores to same address, too complex to promote safely
 
         StoreInst *StoreToPromote = It->second[0];
+
+        // store must run on every iteration if the store is in a conditional branch,
+        // some iterations skip it and the PHI picks up a stale value from a previous iteration
+        if (!DT.dominates(StoreToPromote->getParent(), Latch)) continue;
 
         // verify no other store or call in the loop aliases this address
         MemoryLocation Loc = MemoryLocation::getBeforeOrAfter(Ptr);
@@ -196,7 +215,7 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, Arra
     return Changed;
 }
 
-static bool tryReassociate(Loop &L, BasicBlock *Preheader) {
+static bool tryReassociateArith(Loop &L, BasicBlock *Preheader) {
     SmallVector<BinaryOperator*, 8> Candidates;
 
     for (BasicBlock *BB : L.blocks()) {
@@ -348,39 +367,106 @@ static bool tryHoistReciprocal(Loop &L, BasicBlock *Preheader) {
     return Changed;
 }
 
-static bool trySink(Loop &L) {
-    // single exit only (multiple exits mean users could be spread across them)
+// SE proves loop runs >= 1 time - body instructions isSafeToSpeculativelyExecute rejects (division, faulting loads)
+// are safe to hoist (they would have executed anyway on the first iteration)
+// dominates-latch check ensures the block runs in every loop case (not in a conditional branch inside the loop)
+static bool hoistSEUnlocked(Loop &L, ScalarEvolution &SE, DominatorTree &DT, BasicBlock *Preheader) {
+    if (SE.getSmallConstantTripCount(&L) == 0) return false; // we couldn't determine if loop runs with SE
+
+    BasicBlock *Latch = L.getLoopLatch();
+    if (!Latch) return false;
+
+    SmallVector<Instruction *, 8> Candidates;
+    for (BasicBlock *BB : L.blocks()) {
+        if (!DT.dominates(BB, Latch)) continue; // every path from header to latch goes through BB
+        for (Instruction &I : *BB) {
+            if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I) ||
+                isa<StoreInst>(I) ||  // side effect — N iterations must produce N writes, can't reduce to one
+                isa<CallBase>(I)) continue;
+
+            if (isSafeToSpeculativelyExecute(&I)) continue; // regular hoisting handles these
+            if (!isLoopInvariant(&I, L)) continue;
+            Candidates.push_back(&I);
+        }
+    }
+
+    for (Instruction *I : Candidates) {
+        LLVM_DEBUG(dbgs() << "[licm] se-unlocked hoist: " << *I << "\n");
+        hoistInstruction(*I, Preheader); // also increments NumHoisted — SE instructions counted in both totals
+        ++NumSEHoisted;
+    }
+
+    return !Candidates.empty();
+}
+
+static bool trySink(Loop &L, DominatorTree &DT) {
     BasicBlock *ExitBlock = L.getExitBlock();
-    if (!ExitBlock) return false;
+    if (!ExitBlock) return false; // single exit only
 
     SmallVector<Instruction*, 8> ToSink;
 
     for (BasicBlock *BB : L.blocks()) {
+        // block must dominate the exit (guarantees it ran on the last iteration)
+        if (!DT.dominates(BB, ExitBlock)) continue;
+
         for (Instruction &I : *BB) {
             if (I.isTerminator() || isa<PHINode>(I)) continue;
-            if (!isSafeToSpeculativelyExecute(&I)) continue;
+            if (I.mayReadOrWriteMemory()) continue; // each store/load is a side effect (sinking skips n-1 of them)
 
-            bool CanSink = true;
+            bool AllUsersOutside = true;
             for (User *U : I.users()) {
-                // if any user is still inside the loop, can't sink
-                if (L.contains(cast<Instruction>(U)->getParent()))
-                { CanSink = false; break; }
+                auto *UI = dyn_cast<Instruction>(U);
+                // cannot have users inside the loop
+                if (!UI || L.contains(UI->getParent()))
+                    { AllUsersOutside = false; break; }
             }
-
-            if (CanSink) ToSink.push_back(&I);
+            if (AllUsersOutside) ToSink.push_back(&I);
         }
     }
 
     bool Changed = false;
-
     for (Instruction *I : ToSink) {
         I->moveBefore(&*ExitBlock->getFirstInsertionPt());
         ++NumSunk;
-        LLVM_DEBUG(dbgs() << "[licm] sunk: " << I << "\n");
+        LLVM_DEBUG(dbgs() << "[licm] sunk: " << *I << "\n");
         Changed = true;
     }
-
     return Changed;
+}
+
+static bool sinkSEUnlocked(Loop &L, ScalarEvolution &SE, DominatorTree &DT) {
+    if (SE.getSmallConstantTripCount(&L) == 0) return false;
+
+    BasicBlock *ExitBlock = L.getExitBlock();
+    if (!ExitBlock) return false;
+
+    BasicBlock *Latch = L.getLoopLatch();
+    if (!Latch) return false;
+
+    SmallVector<Instruction*, 8> Candidates;
+    for (BasicBlock *BB : L.blocks()) {
+        if (!DT.dominates(BB, Latch)) continue; // every path from header to latch goes through BB
+        for (Instruction &I : *BB) {
+            if (I.isTerminator() || isa<PHINode>(I)) continue;
+            if (I.mayReadOrWriteMemory()) continue;
+
+            bool AllUsersOutside = true;
+            for (User *U : I.users()) {
+                auto *UI = dyn_cast<Instruction>(U);
+                if (!UI || L.contains(UI->getParent()))
+                    { AllUsersOutside = false; break; }
+            }
+            if (AllUsersOutside) Candidates.push_back(&I);
+        }
+    }
+
+    for (Instruction *I : Candidates) {
+        LLVM_DEBUG(dbgs() << "[licm] se-unlocked sunk: " << *I << "\n");
+        I->moveBefore(&*ExitBlock->getFirstInsertionPt());
+        ++NumSunk;
+        ++NumSESunk;
+    }
+    return !Candidates.empty();
 }
 
 struct LICMPass : PassInfoMixin<LICMPass> {
@@ -399,6 +485,7 @@ struct LICMPass : PassInfoMixin<LICMPass> {
         collectLoopMemoryOps(L, LoopLoads, LoopStores, LoopCalls);
 
         bool Changed = false;
+
         for (BasicBlock *BB : L.getBlocks()) {
             SmallVector<Instruction*, 8> ToHoist;
             for (Instruction &I : *BB) {
@@ -406,7 +493,7 @@ struct LICMPass : PassInfoMixin<LICMPass> {
                     if (canHoistLoad(*LI, L, AR.AA, LoopStores, LoopCalls))
                         ToHoist.push_back(&I);
                 } else if (auto *CB = dyn_cast<CallBase>(&I)) {
-                    if (canHoistCall(*CB, L, AR.AA, LoopStores))
+                    if (canHoistCall(*CB, L, AR.AA, LoopStores, LoopCalls))
                         ToHoist.push_back(&I);
                 } else if (isSafeToHoist(I, L, AR.DT)) {
                     ToHoist.push_back(&I);
@@ -419,11 +506,15 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             }
         }
 
-        Changed |= tryReassociate(L, Preheader);
+        // promotion first - converts load/store pairs to SSA registers, exposing new invariant
+        // values that reassociation and reciprocal can then pick up
+        Changed |= tryPromoteMemory(L, AR.AA, AR.DT, Preheader, LoopLoads, LoopStores, LoopCalls);
+        Changed |= tryReassociateArith(L, Preheader);
         Changed |= tryReassociateGEP(L, Preheader);
         Changed |= tryHoistReciprocal(L, Preheader);
-        Changed |= tryPromoteMemory(L, AR.AA, Preheader, LoopLoads, LoopStores, LoopCalls);
-        Changed |= trySink(L);
+        Changed |= trySink(L, AR.DT);
+        Changed |= hoistSEUnlocked(L, AR.SE, AR.DT, Preheader);
+        Changed |= sinkSEUnlocked(L, AR.SE, AR.DT);
 
         // fix LCSSA after all transformations (exit PHIs mark where loop-internal values leave the loop)
         formLCSSARecursively(L, AR.DT, &AR.LI, &AR.SE);
