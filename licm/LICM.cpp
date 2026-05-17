@@ -196,6 +196,119 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, BasicBlock *Preheader, Arra
     return Changed;
 }
 
+static bool tryReassociate(Loop &L, BasicBlock *Preheader) {
+    SmallVector<BinaryOperator*, 8> Candidates;
+
+    for (BasicBlock *BB : L.blocks()) {
+        for (Instruction &I : *BB) {
+            auto *Outer = dyn_cast<BinaryOperator>(&I);
+            if (!Outer) continue;
+
+            // only for add and mul (sub and div are not associative, (a-b)-c = a-(b-c) doesn't hold)
+            Instruction::BinaryOps OC = Outer->getOpcode();
+            if (OC != Instruction::Add  && OC != Instruction::Mul &&
+                OC != Instruction::FAdd && OC != Instruction::FMul) continue;
+
+            if (isLoopInvariant(Outer, L)) continue; // whole instruction invariant (regular hoisting handles it)
+
+            Value *Op0 = Outer->getOperand(0), *Op1 = Outer->getOperand(1);
+            bool Inv0 = isLoopInvariant(Op0, L), Inv1 = isLoopInvariant(Op1, L);
+            if (!Inv0 && !Inv1) continue; // both vary (nothing to extract)
+
+            // varying operand must be the same op ((a+b)+c can regroup, (a+b)*c cannot)
+            auto *Inner = dyn_cast<BinaryOperator>(Inv0 ? Op1 : Op0);
+            if (!Inner || Inner->getOpcode() != OC) continue;
+
+            // inner op must have an invariant operand to extract
+            if (!isLoopInvariant(Inner->getOperand(0), L) &&
+                !isLoopInvariant(Inner->getOperand(1), L)) continue;
+
+            Candidates.push_back(Outer);
+        }
+    }
+
+    bool Changed = false;
+
+    for (BinaryOperator *Outer : Candidates) {
+        Instruction::BinaryOps OC = Outer->getOpcode();
+        Value *Op0 = Outer->getOperand(0), *Op1 = Outer->getOperand(1);
+        bool Inv0 = isLoopInvariant(Op0, L);
+        Value *OuterInv = Inv0 ? Op0 : Op1;
+        Value *OuterVar = Inv0 ? Op1 : Op0;
+
+        auto *Inner = cast<BinaryOperator>(OuterVar); // safe (verified in collection phase)
+        Value *InnerInv = isLoopInvariant(Inner->getOperand(0), L)
+                              ? Inner->getOperand(0) : Inner->getOperand(1);
+
+        // combine the two invariant sub-expressions once in the preheader (one op instead of two per iteration)
+        IRBuilder<> B(Preheader->getTerminator());
+        Value *Combined = B.CreateBinOp(OC, InnerInv, OuterInv, "reassoc");
+
+        // rewrite inner op to use the combined invariant (outer op is now redundant)
+        Inner->replaceUsesOfWith(InnerInv, Combined);
+        Outer->replaceAllUsesWith(Inner);
+        Outer->eraseFromParent();
+
+        ++NumHoisted;
+        LLVM_DEBUG(dbgs() << "[licm] reassociated: " << *Inner << "\n");
+        Changed = true;
+    }
+
+    return Changed;
+}
+
+static bool tryReassociateGEP(Loop &L, BasicBlock *Preheader) {
+    SmallVector<GetElementPtrInst*, 8> Candidates;
+
+    for (BasicBlock *BB : L.blocks()) {
+        for (Instruction &I : *BB) {
+            auto *GEP = dyn_cast<GetElementPtrInst>(&I);
+            if (!GEP) continue;
+
+            if (isLoopInvariant(GEP, L)) continue; // whole GEP invariant (regular hoisting handles it)
+            if (!isLoopInvariant(GEP->getPointerOperand(), L)) continue; // varying base (no fixed starting point to hoist to)
+            if (GEP->getNumIndices() != 1) continue; // multidimensional (too complex to split)
+
+            // index must be an add with one invariant operand to extract as offset
+            auto *Idx = dyn_cast<BinaryOperator>(GEP->getOperand(1));
+            if (!Idx || Idx->getOpcode() != Instruction::Add) continue;
+
+            bool InvIdx0 = isLoopInvariant(Idx->getOperand(0), L);
+            bool InvIdx1 = isLoopInvariant(Idx->getOperand(1), L);
+            if (!InvIdx0 && !InvIdx1) continue; // both vary (nothing to extract)
+
+            Candidates.push_back(GEP);
+        }
+    }
+
+    bool Changed = false;
+
+    for (GetElementPtrInst *GEP : Candidates) {
+        auto *Idx = cast<BinaryOperator>(GEP->getOperand(1)); // safe (verified in collection phase)
+        bool InvIdx0 = isLoopInvariant(Idx->getOperand(0), L);
+        Value *InvPart = InvIdx0 ? Idx->getOperand(0) : Idx->getOperand(1);
+        Value *VarPart = InvIdx0 ? Idx->getOperand(1) : Idx->getOperand(0);
+
+        // advance base pointer by invariant offset once in preheader (stable base for the whole loop)
+        IRBuilder<> PreB(Preheader->getTerminator());
+        Value *BasePtr = PreB.CreateGEP(GEP->getSourceElementType(), GEP->getPointerOperand(), InvPart, "gep.base");
+
+        // new GEP steps from the preheader base (only the varying index remains)
+        IRBuilder<> LoopB(GEP);
+        Value *NewGEP = LoopB.CreateGEP(GEP->getSourceElementType(), BasePtr, VarPart, "gep.var");
+
+        // old GEP replaced (NewGEP computes the same address with one fewer op per iteration)
+        GEP->replaceAllUsesWith(NewGEP);
+        GEP->eraseFromParent();
+
+        ++NumHoisted;
+        LLVM_DEBUG(dbgs() << "[licm] GEP reassociated: " << *NewGEP << "\n");
+        Changed = true;
+    }
+
+    return Changed;
+}
+
 static bool tryHoistReciprocal(Loop &L, BasicBlock *Preheader) {
     SmallVector<BinaryOperator*, 8> FDivs;
 
@@ -306,6 +419,8 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             }
         }
 
+        Changed |= tryReassociate(L, Preheader);
+        Changed |= tryReassociateGEP(L, Preheader);
         Changed |= tryHoistReciprocal(L, Preheader);
         Changed |= tryPromoteMemory(L, AR.AA, Preheader, LoopLoads, LoopStores, LoopCalls);
         Changed |= trySink(L);
