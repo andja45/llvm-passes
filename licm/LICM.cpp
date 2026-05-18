@@ -103,8 +103,10 @@ static bool isSafeToHoist(Instruction &I, Loop &L, DominatorTree &DT) {
     if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I) || isa<StoreInst>(I) || isa<CallBase>(I))
         return false;
 
+    // strict check - operand must already be outside the loop
+    // recursive isLoopInvariant would allow hoisting X that uses Y still in the loop
     for (Value *Op : I.operands())
-        if (!isLoopInvariant(Op, L))
+        if (!L.isLoopInvariant(Op))
             return false;
 
     // unsafe instructions require dominating all exits which ensures no new execution is introduced
@@ -229,16 +231,17 @@ static bool tryReassociateArith(Loop &L, BasicBlock *Preheader) {
             if (isLoopInvariant(Outer, L)) continue; // whole instruction invariant (regular hoisting handles it)
 
             Value *Op0 = Outer->getOperand(0), *Op1 = Outer->getOperand(1);
-            bool Inv0 = isLoopInvariant(Op0, L), Inv1 = isLoopInvariant(Op1, L);
+
+            bool Inv0 = L.isLoopInvariant(Op0), Inv1 = L.isLoopInvariant(Op1);
             if (!Inv0 && !Inv1) continue; // both vary (nothing to extract)
 
             // varying operand must be the same op ((a+b)+c can regroup, (a+b)*c cannot)
             auto *Inner = dyn_cast<BinaryOperator>(Inv0 ? Op1 : Op0);
             if (!Inner || Inner->getOpcode() != OC) continue;
 
-            // inner op must have an invariant operand to extract
-            if (!isLoopInvariant(Inner->getOperand(0), L) &&
-                !isLoopInvariant(Inner->getOperand(1), L)) continue;
+            // inner op must have a strictly invariant operand to extract to preheader
+            if (!L.isLoopInvariant(Inner->getOperand(0)) &&
+                !L.isLoopInvariant(Inner->getOperand(1))) continue;
 
             Candidates.push_back(Outer);
         }
@@ -249,12 +252,12 @@ static bool tryReassociateArith(Loop &L, BasicBlock *Preheader) {
     for (BinaryOperator *Outer : Candidates) {
         Instruction::BinaryOps OC = Outer->getOpcode();
         Value *Op0 = Outer->getOperand(0), *Op1 = Outer->getOperand(1);
-        bool Inv0 = isLoopInvariant(Op0, L);
+        bool Inv0 = L.isLoopInvariant(Op0);
         Value *OuterInv = Inv0 ? Op0 : Op1;
         Value *OuterVar = Inv0 ? Op1 : Op0;
 
         auto *Inner = cast<BinaryOperator>(OuterVar); // safe (verified in collection phase)
-        Value *InnerInv = isLoopInvariant(Inner->getOperand(0), L)
+        Value *InnerInv = L.isLoopInvariant(Inner->getOperand(0))
                               ? Inner->getOperand(0) : Inner->getOperand(1);
 
         // combine the two invariant sub-expressions once in the preheader (one op instead of two per iteration)
