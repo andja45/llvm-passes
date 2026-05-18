@@ -145,13 +145,11 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, DominatorTree &DT, BasicBlo
     SmallDenseMap<Value*, SmallVector<StoreInst*, 2>> StoresByPtr;
 
     for (LoadInst *LI : LoopLoads)
-        if (!LI->isVolatile() && !LI->isAtomic() &&
-            isLoopInvariant(LI->getPointerOperand(), L))
+        if (!LI->isVolatile() && !LI->isAtomic() && isLoopInvariant(LI->getPointerOperand(), L))
             LoadsByPtr[LI->getPointerOperand()].push_back(LI);
 
     for (StoreInst *SI : LoopStores)
-        if (!SI->isVolatile() && !SI->isAtomic() &&
-            isLoopInvariant(SI->getPointerOperand(), L))
+        if (!SI->isVolatile() && !SI->isAtomic() && isLoopInvariant(SI->getPointerOperand(), L))
             StoresByPtr[SI->getPointerOperand()].push_back(SI);
 
     bool Changed = false;
@@ -413,6 +411,7 @@ static bool trySink(Loop &L, DominatorTree &DT) {
             if (I.isTerminator() || isa<PHINode>(I)) continue;
             if (I.mayReadOrWriteMemory()) continue; // each store/load is a side effect (sinking skips n-1 of them)
 
+            if (I.use_empty()) continue; // no users to sink toward, DCE will handle it
             bool AllUsersOutside = true;
             for (User *U : I.users()) {
                 auto *UI = dyn_cast<Instruction>(U);
@@ -450,6 +449,7 @@ static bool sinkSEUnlocked(Loop &L, ScalarEvolution &SE, DominatorTree &DT) {
             if (I.isTerminator() || isa<PHINode>(I)) continue;
             if (I.mayReadOrWriteMemory()) continue;
 
+            if (I.use_empty()) continue;
             bool AllUsersOutside = true;
             for (User *U : I.users()) {
                 auto *UI = dyn_cast<Instruction>(U);
@@ -479,42 +479,48 @@ struct LICMPass : PassInfoMixin<LICMPass> {
             return PreservedAnalyses::all();
         }
 
-        SmallVector<LoadInst*, 8> LoopLoads;
-        SmallVector<StoreInst*, 8> LoopStores;
-        SmallVector<CallBase*, 8> LoopCalls;
-        collectLoopMemoryOps(L, LoopLoads, LoopStores, LoopCalls);
-
         bool Changed = false;
+        bool Iter;
 
-        for (BasicBlock *BB : L.getBlocks()) {
-            SmallVector<Instruction*, 8> ToHoist;
-            for (Instruction &I : *BB) {
-                if (auto *LI = dyn_cast<LoadInst>(&I)) {
-                    if (canHoistLoad(*LI, L, AR.AA, LoopStores, LoopCalls))
+        // hoisting X can make Y invariant, next iteration hoists Y
+        do {
+            Iter = false;
+
+            // recollect each iteration (hoisted stores/calls change AA results)
+            SmallVector<LoadInst*, 8>  LoopLoads;
+            SmallVector<StoreInst*, 8> LoopStores;
+            SmallVector<CallBase*, 8>  LoopCalls;
+            collectLoopMemoryOps(L, LoopLoads, LoopStores, LoopCalls);
+
+            for (BasicBlock *BB : L.getBlocks()) {
+                SmallVector<Instruction*, 8> ToHoist;
+                for (Instruction &I : *BB) {
+                    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                        if (canHoistLoad(*LI, L, AR.AA, LoopStores, LoopCalls))
+                            ToHoist.push_back(&I);
+                    } else if (auto *CB = dyn_cast<CallBase>(&I)) {
+                        if (canHoistCall(*CB, L, AR.AA, LoopStores, LoopCalls))
+                            ToHoist.push_back(&I);
+                    } else if (isSafeToHoist(I, L, AR.DT)) {
                         ToHoist.push_back(&I);
-                } else if (auto *CB = dyn_cast<CallBase>(&I)) {
-                    if (canHoistCall(*CB, L, AR.AA, LoopStores, LoopCalls))
-                        ToHoist.push_back(&I);
-                } else if (isSafeToHoist(I, L, AR.DT)) {
-                    ToHoist.push_back(&I);
+                    }
+                }
+                for (Instruction *I : ToHoist) {
+                    hoistInstruction(*I, Preheader);
+                    Iter = true;
                 }
             }
 
-            for (Instruction *I : ToHoist) {
-                hoistInstruction(*I, Preheader);
-                Changed = true;
-            }
-        }
+            Iter |= tryPromoteMemory(L, AR.AA, AR.DT, Preheader, LoopLoads, LoopStores, LoopCalls);
+            Iter |= tryReassociateArith(L, Preheader);
+            Iter |= tryReassociateGEP(L, Preheader);
+            Iter |= tryHoistReciprocal(L, Preheader);
+            Iter |= trySink(L, AR.DT);
+            Iter |= hoistSEUnlocked(L, AR.SE, AR.DT, Preheader);
+            Iter |= sinkSEUnlocked(L, AR.SE, AR.DT);
 
-        // promotion first - converts load/store pairs to SSA registers, exposing new invariant
-        // values that reassociation and reciprocal can then pick up
-        Changed |= tryPromoteMemory(L, AR.AA, AR.DT, Preheader, LoopLoads, LoopStores, LoopCalls);
-        Changed |= tryReassociateArith(L, Preheader);
-        Changed |= tryReassociateGEP(L, Preheader);
-        Changed |= tryHoistReciprocal(L, Preheader);
-        Changed |= trySink(L, AR.DT);
-        Changed |= hoistSEUnlocked(L, AR.SE, AR.DT, Preheader);
-        Changed |= sinkSEUnlocked(L, AR.SE, AR.DT);
+            Changed |= Iter;
+        } while (Iter);
 
         // fix LCSSA after all transformations (exit PHIs mark where loop-internal values leave the loop)
         formLCSSARecursively(L, AR.DT, &AR.LI, &AR.SE);

@@ -1,5 +1,5 @@
-; ModuleID = '/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes-project/examples/licm/hoist_reassoc_gep//original.ll'
-source_filename = "/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes-project/examples/licm/hoist_reassoc_gep//input.c"
+; ModuleID = '/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes/examples/licm/hoist_reassoc_gep//original.ll'
+source_filename = "/home/andja/Cetvrta godina/Drugi Semestar/KK/projekat/llvm-passes/examples/licm/hoist_reassoc_gep//input.c"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
 
@@ -15,6 +15,7 @@ for.cond:                                         ; preds = %for.inc, %entry
   br i1 %cmp, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond
+  %add = add nsw i64 %i.0, %offset
   %gep.var = getelementptr float, ptr %gep.base, i64 %i.0
   %0 = load float, ptr %gep.var, align 4
   %arrayidx1 = getelementptr inbounds float, ptr %dst, i64 %i.0
@@ -26,8 +27,6 @@ for.inc:                                          ; preds = %for.body
   br label %for.cond, !llvm.loop !6
 
 for.end:                                          ; preds = %for.cond
-  %i.0.lcssa = phi i64 [ %i.0, %for.cond ]
-  %add = add nsw i64 %i.0.lcssa, %offset
   ret void
 }
 
