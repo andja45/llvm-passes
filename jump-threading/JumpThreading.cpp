@@ -6,8 +6,17 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/CFG.h"
+#include <vector>
 
 using namespace llvm;
+
+struct ThreadCandidate {
+    BasicBlock *Pred;
+    BasicBlock *Current;
+
+    BranchInst *PredBranch;
+    BranchInst *CurrentBranch;
+};
 
 static bool sameComparison(ICmpInst* A, ICmpInst* B) {
 
@@ -16,7 +25,7 @@ static bool sameComparison(ICmpInst* A, ICmpInst* B) {
             A->getOperand(1) == B->getOperand(1);
 }
 
-static bool canThread(BasicBlock* Pred, BasicBlock* BB) {
+static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candidate) {
 
     // predecessor
 
@@ -50,10 +59,20 @@ static bool canThread(BasicBlock* Pred, BasicBlock* BB) {
     if(!PredCmp || !CurrentCmp)
         return false;
 
-    return sameComparison(PredCmp, CurrentCmp);
+    if(!sameComparison(PredCmp, CurrentCmp))
+        return false;
+
+    Candidate.Pred = Pred;
+    Candidate.Current = BB;
+
+    Candidate.PredBranch = PredBranch;
+    Candidate.CurrentBranch = CurrentBranch;
+
+    return true;
 }
 
-static void findThreadingOpportunities(Function &F) {
+static void findThreadingOpportunities(Function &F,
+    std::vector<ThreadCandidate>& Candidates) {
 
     for(BasicBlock &BB : F) {
         auto *Branch = dyn_cast<BranchInst>(BB.getTerminator());
@@ -63,19 +82,29 @@ static void findThreadingOpportunities(Function &F) {
 
         for(BasicBlock* Pred : predecessors(&BB)) {
 
-            if(canThread(Pred, &BB)) {
+            ThreadCandidate Candidate;
 
-                errs() << "Threading opportunity:\n";
-                errs() << " predecessor: ";
-                Pred->printAsOperand(errs(), false);
-                errs() << "\n";
-
-                errs() << " current: ";
-                BB.printAsOperand(errs(), false);
-                errs() << "\n\n";
-            }
+            if(canThread(Pred, &BB, Candidate))
+                Candidates.push_back(Candidate);
         }
     }
+}
+
+static void processCandidates(std::vector<ThreadCandidate>& Candidates) {
+
+    for(ThreadCandidate& C : Candidates) {
+
+        errs() << "Threading candidate:\n";
+
+        errs() << " Pred: ";
+        C.Pred->printAsOperand(errs(), false);
+        errs() << "\n";
+
+        errs() << " Current: ";
+        C.Current->printAsOperand(errs(), false);
+        errs() << "\n";
+    }
+
 }
 
 struct JumpThreadingPass : PassInfoMixin<JumpThreadingPass> {
@@ -85,50 +114,13 @@ struct JumpThreadingPass : PassInfoMixin<JumpThreadingPass> {
         (void)AM;
         errs() << "Visiting function: " << F.getName() << "\n";
 
-        /*for(BasicBlock &BB : F) {
+        std::vector<ThreadCandidate> Candidates;
 
-            Instruction* Term = BB.getTerminator();
+        findThreadingOpportunities(F, Candidates);
 
-            if(BranchInst* BI = dyn_cast<BranchInst>(Term)) {
+        errs() << "Found " << Candidates.size() << " threading candidate(s)\n";
 
-                //errs() << " Ovo je BranchInst!\n";
-
-                if(BI->isConditional()) {
-
-                    Value* Cond = BI->getCondition();
-
-                    if(ICmpInst* Cmp = dyn_cast<ICmpInst>(Cond)) {
-                        ;
-                    }
-
-                    for(BasicBlock* Pred : predecessors(&BB)) {
-
-                        errs() << " ";
-                        if(Pred->hasName())
-                            errs() << Pred->getName();
-                        else
-                            errs() << "(unnamed)";
-
-                        errs() << "\n";
-
-                        if(canThread(Pred, &BB))
-                            errs() << ">>> Threading opportunity found!\n";
-                    }
-                }
-                else
-                    ;
-                    //errs() << " Unconditional branch\n";
-
-            }
-
-            if(BB.hasName())
-                errs() << BB.getName();
-            else
-                errs() << "(unnamed)";
-            
-            errs() << "\n";
-           
-        }*/
+        processCandidates(Candidates);
 
         return PreservedAnalyses::all();
     }
