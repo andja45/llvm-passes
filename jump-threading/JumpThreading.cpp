@@ -124,6 +124,20 @@ static bool threadCandidate(ThreadCandidate& C) {
     else
         Target = C.CurrentBranch->getSuccessor(1);
 
+    errs() << "Threading candidate:\n";
+
+    errs() << " Pred: ";
+    C.Pred->printAsOperand(errs(), false);
+    errs() << "\n";
+
+    errs() << " Current: ";
+    C.Current->printAsOperand(errs(), false);
+    errs() << "\n";
+
+    errs() << " Edge: "
+        << (C.TakenEdge ? "true" : "false")
+        << "\n\n";
+
     errs() << "Redirecting edge: ";
 
     C.Pred->printAsOperand(errs(), false);
@@ -132,30 +146,23 @@ static bool threadCandidate(ThreadCandidate& C) {
 
     errs() << "\n";
 
-    return false;
+    if(Target == C.Current || Target == C.Pred)
+        return false;
+
+    C.PredBranch->setSuccessor(C.TakenEdge ? 0 : 1, Target);
+
+    return true;
 }
 
-static void processCandidates(std::vector<ThreadCandidate>& Candidates) {
+static bool processCandidates(std::vector<ThreadCandidate>& Candidates) {
+
+    bool Changed = false;
 
     for(ThreadCandidate& C : Candidates) {
-
-        threadCandidate(C);
-
-        errs() << "Threading candidate:\n";
-
-        errs() << " Pred: ";
-        C.Pred->printAsOperand(errs(), false);
-        errs() << "\n";
-
-        errs() << " Current: ";
-        C.Current->printAsOperand(errs(), false);
-        errs() << "\n";
-
-        errs() << " Edge: "
-            << (C.TakenEdge ? "true" : "false")
-            << "\n\n";
+        Changed |= threadCandidate(C);
     }
 
+    return Changed;
 }
 
 struct JumpThreadingPass : PassInfoMixin<JumpThreadingPass> {
@@ -171,8 +178,11 @@ struct JumpThreadingPass : PassInfoMixin<JumpThreadingPass> {
 
         errs() << "Found " << Candidates.size() << " threading candidate(s)\n";
 
-        processCandidates(Candidates);
+        bool Changed = processCandidates(Candidates);
 
+        if(Changed)
+            return PreservedAnalyses::none();
+        
         return PreservedAnalyses::all();
     }
 
