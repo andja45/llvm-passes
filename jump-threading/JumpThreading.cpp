@@ -6,6 +6,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include <vector>
 
 using namespace llvm;
@@ -25,26 +26,23 @@ static bool sameComparison(ICmpInst* A, ICmpInst* B) {
     if(A->getPredicate() != B->getPredicate())
         return false;
 
-    auto *LoadA = dyn_cast<LoadInst>(A->getOperand(0));
-    auto *LoadB = dyn_cast<LoadInst>(B->getOperand(0));
+    Value *OpA = A->getOperand(0);
+    Value *OpB = B->getOperand(0);
 
-    if(!LoadA || !LoadB)
-        return false;
+    if(auto *LoadA = dyn_cast<LoadInst>(OpA))
+        OpA = LoadA->getPointerOperand();
 
-    if(LoadA->getPointerOperand() != LoadB->getPointerOperand())
-        return false;
+    if(auto *LoadB = dyn_cast<LoadInst>(OpB))
+        OpB = LoadB->getPointerOperand();
 
-    return A->getOperand(1) == B->getOperand(1);
+    return OpA == OpB && A->getOperand(1) == B->getOperand(1);
 }
 
 static ICmpInst* getCompare(BasicBlock* BB) {
 
     auto *Branch = dyn_cast<BranchInst>(BB->getTerminator());
 
-    if(!Branch)
-        return nullptr;
-
-    if(!Branch->isConditional())
+    if(!Branch || !Branch->isConditional())
         return nullptr;
 
     return dyn_cast<ICmpInst>(Branch->getCondition());
@@ -58,6 +56,26 @@ static BasicBlock* skipUnconditionalBlock(BasicBlock* BB) {
         return BB;
 
     return BB->getSinglePredecessor();
+}
+
+static bool predecessorModifiesMemory(BasicBlock* Pred, Value* Memory) {
+
+    bool AfterCompare = false;
+
+    for(Instruction& I : *Pred) {
+        if(isa<ICmpInst>(&I))
+            AfterCompare = true;
+
+        if(!AfterCompare)
+            continue;
+
+        if(auto *Store = dyn_cast<StoreInst>(&I)) {
+            if(Store->getPointerOperand() == Memory)
+                return true;
+        }
+    }
+
+    return false;
 }
 
 static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candidate) {
@@ -85,6 +103,11 @@ static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candida
     if(!sameComparison(PredCmp, CurrentCmp))
         return false;
 
+    auto *Load = cast<LoadInst>(PredCmp->getOperand(0));
+
+    if(predecessorModifiesMemory(Pred, Load->getPointerOperand()))
+        return false;
+
     Candidate.Pred = Pred;
     Candidate.Current = BB;
 
@@ -100,9 +123,8 @@ static void findThreadingOpportunities(Function &F,
     std::vector<ThreadCandidate>& Candidates) {
 
     for(BasicBlock &BB : F) {
-        auto *Branch = dyn_cast<BranchInst>(BB.getTerminator());
 
-        if(!Branch || !Branch->isConditional())
+        if(!getCompare(&BB))
             continue;
 
         for(BasicBlock* Pred : predecessors(&BB)) {
@@ -117,35 +139,24 @@ static void findThreadingOpportunities(Function &F,
 
 static bool threadCandidate(ThreadCandidate& C) {
 
-    BasicBlock* Target;
-
-    if(C.TakenEdge)
-        Target = C.CurrentBranch->getSuccessor(0);
-    else
-        Target = C.CurrentBranch->getSuccessor(1);
+    BasicBlock* Target = C.CurrentBranch->getSuccessor(C.TakenEdge ? 0 : 1);
 
     errs() << "Threading candidate:\n";
 
-    errs() << " Pred: ";
+    errs() << " Predecessor: ";
     C.Pred->printAsOperand(errs(), false);
-    errs() << "\n";
 
-    errs() << " Current: ";
+    errs() << "\n Current: ";
     C.Current->printAsOperand(errs(), false);
-    errs() << "\n";
 
-    errs() << " Edge: "
+    errs() << "\n Taken edge: "
         << (C.TakenEdge ? "true" : "false")
-        << "\n\n";
+        << "\n";
 
-    errs() << "Redirecting edge: ";
-
-    C.Pred->printAsOperand(errs(), false);
-    errs() << " -> ";
+    errs() << " Redirected to: ";
     Target->printAsOperand(errs(), false);
-
-    errs() << "\n";
-
+    errs() << "\n\n";
+    
     if(Target == C.Current || Target == C.Pred)
         return false;
 
@@ -178,12 +189,9 @@ struct JumpThreadingPass : PassInfoMixin<JumpThreadingPass> {
 
         errs() << "Found " << Candidates.size() << " threading candidate(s)\n";
 
-        bool Changed = processCandidates(Candidates);
-
-        if(Changed)
-            return PreservedAnalyses::none();
-        
-        return PreservedAnalyses::all();
+        return processCandidates(Candidates)
+            ? PreservedAnalyses::none()
+            : PreservedAnalyses::all();
     }
 
 };
