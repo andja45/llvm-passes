@@ -4,8 +4,15 @@ set -euo pipefail
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
 
 # register passes here
-declare -A PLUGIN_NAME=([licm]="LICM")
-declare -A OPT_PASSES=([licm]="mem2reg,loop(licm-pass)")
+declare -A PLUGIN_NAME=(
+    [licm]="LICM"
+    [simplifycfg]="SimplifyCFG"
+)
+
+declare -A OPT_PASSES=(
+    [licm]="mem2reg,loop(licm-pass)"
+    [simplifycfg]="simplifycfg-pass"
+)
 
 PASSES=("${!PLUGIN_NAME[@]}")
 [ $# -gt 0 ] && PASSES=("$@")
@@ -33,14 +40,20 @@ run_pass() {
         return
     fi
 
-    for DIR in "$PROJECT/examples/$PASS"/*/; do
-        [ -f "$DIR/input.c" ] || continue
-        NAME=$(basename "$DIR")
+    while IFS= read -r -d '' INPUT; do
+        DIR="$(dirname "$INPUT")"
+        NAME="${DIR#"$PROJECT/examples/$PASS/"}"
         echo "  --> $NAME"
 
-        clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone \
-              -fno-discard-value-names \
-              "$DIR/input.c" -o "$DIR/original.ll"
+        if [ -f "$DIR/input.c" ]; then
+            clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone \
+                -fno-discard-value-names \
+                "$DIR/input.c" -o "$DIR/original.ll"
+        elif [ -f "$DIR/input.ll" ]; then
+            cp "$DIR/input.ll" "$DIR/original.ll"
+        else
+            continue
+        fi
 
         if ! opt --load-pass-plugin="$PLUGIN" \
                 --passes="${OPT_PASSES[$PASS]}" \
@@ -58,7 +71,12 @@ run_pass() {
         generate_cfg optimized.ll optimized.png
         rm -f "$BEFORE"
         cd "$PROJECT"
-    done
+    done < <(
+        find "$PROJECT/examples/$PASS" \
+            -type f \
+            \( -name "input.c" -o -name "input.ll" \) \
+            -print0
+    )
 }
 
 for PASS in "${PASSES[@]}"; do
