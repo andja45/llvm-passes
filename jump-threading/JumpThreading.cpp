@@ -16,48 +16,71 @@ struct ThreadCandidate {
 
     BranchInst *PredBranch;
     BranchInst *CurrentBranch;
+
+    bool TakenEdge;
 };
 
 static bool sameComparison(ICmpInst* A, ICmpInst* B) {
 
-    return A->getPredicate() == B->getPredicate() &&
-            A->getOperand(0) == B->getOperand(0) &&
-            A->getOperand(1) == B->getOperand(1);
+    if(A->getPredicate() != B->getPredicate())
+        return false;
+
+    auto *LoadA = dyn_cast<LoadInst>(A->getOperand(0));
+    auto *LoadB = dyn_cast<LoadInst>(B->getOperand(0));
+
+    if(!LoadA || !LoadB)
+        return false;
+
+    if(LoadA->getPointerOperand() != LoadB->getPointerOperand())
+        return false;
+
+    return A->getOperand(1) == B->getOperand(1);
+}
+
+static ICmpInst* getCompare(BasicBlock* BB) {
+
+    auto *Branch = dyn_cast<BranchInst>(BB->getTerminator());
+
+    if(!Branch)
+        return nullptr;
+
+    if(!Branch->isConditional())
+        return nullptr;
+
+    return dyn_cast<ICmpInst>(Branch->getCondition());
+}
+
+static BasicBlock* skipUnconditionalBlock(BasicBlock* BB) {
+
+    auto *Branch = dyn_cast<BranchInst>(BB->getTerminator());
+
+    if(!Branch || Branch->isConditional() || !BB->getSinglePredecessor())
+        return BB;
+
+    return BB->getSinglePredecessor();
 }
 
 static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candidate) {
 
     // predecessor
 
-    Instruction* PredTerm = Pred->getTerminator();
-    auto *PredBranch = dyn_cast<BranchInst>(PredTerm);
+    Pred = skipUnconditionalBlock(Pred);
 
-    if(!PredBranch)
+    ICmpInst* PredCmp = getCompare(Pred);
+
+    if(!PredCmp)
         return false;
 
-    if(!PredBranch->isConditional())
-        return false;
-
-    Value *PredCond = PredBranch->getCondition();
+    auto *PredBranch = cast<BranchInst>(Pred->getTerminator());
 
     // current
 
-    auto *CurrentBranch = dyn_cast<BranchInst>(BB->getTerminator());
-    
-    if(!CurrentBranch)
+    ICmpInst *CurrentCmp = getCompare(BB);
+
+    if (!CurrentCmp)
         return false;
 
-    if(!CurrentBranch->isConditional())
-        return false;
-
-
-    Value *CurrentCond = CurrentBranch->getCondition();
-
-    auto *PredCmp = dyn_cast<ICmpInst>(PredCond);
-    auto *CurrentCmp = dyn_cast<ICmpInst>(CurrentCond);
-
-    if(!PredCmp || !CurrentCmp)
-        return false;
+    auto *CurrentBranch = cast<BranchInst>(BB->getTerminator());
 
     if(!sameComparison(PredCmp, CurrentCmp))
         return false;
@@ -67,6 +90,8 @@ static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candida
 
     Candidate.PredBranch = PredBranch;
     Candidate.CurrentBranch = CurrentBranch;
+
+    Candidate.TakenEdge = (PredBranch->getSuccessor(0) == BB);
 
     return true;
 }
@@ -90,9 +115,31 @@ static void findThreadingOpportunities(Function &F,
     }
 }
 
+static bool threadCandidate(ThreadCandidate& C) {
+
+    BasicBlock* Target;
+
+    if(C.TakenEdge)
+        Target = C.CurrentBranch->getSuccessor(0);
+    else
+        Target = C.CurrentBranch->getSuccessor(1);
+
+    errs() << "Redirecting edge: ";
+
+    C.Pred->printAsOperand(errs(), false);
+    errs() << " -> ";
+    Target->printAsOperand(errs(), false);
+
+    errs() << "\n";
+
+    return false;
+}
+
 static void processCandidates(std::vector<ThreadCandidate>& Candidates) {
 
     for(ThreadCandidate& C : Candidates) {
+
+        threadCandidate(C);
 
         errs() << "Threading candidate:\n";
 
@@ -103,6 +150,10 @@ static void processCandidates(std::vector<ThreadCandidate>& Candidates) {
         errs() << " Current: ";
         C.Current->printAsOperand(errs(), false);
         errs() << "\n";
+
+        errs() << " Edge: "
+            << (C.TakenEdge ? "true" : "false")
+            << "\n\n";
     }
 
 }
