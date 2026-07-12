@@ -1,33 +1,30 @@
 #!/bin/bash
-
-echo "USING JUMP-THREADING VISUALIZE.SH"
-
 set -euo pipefail
 
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
 
 # register passes here
-declare -A PLUGIN_NAME=([licm]="LICM")
-declare -A OPT_PASSES=([licm]="mem2reg,loop(licm-pass)")
+declare -A PLUGIN_NAME=(
+    [licm]="LICM"
+    [jump-threading]="JumpThreading"
+)
+
+declare -A OPT_PASSES=(
+    [licm]="mem2reg,loop(licm-pass)"
+    [jump-threading]="my-jump-threading"    
+)
 
 PASSES=("${!PLUGIN_NAME[@]}")
 [ $# -gt 0 ] && PASSES=("$@")
 
 generate_cfg() {
-    local input="$1"
-
+    local input="$1" output="$2"
     opt -passes=dot-cfg -disable-output "$input" 2>/dev/null
-
     for DOT in .*.dot; do
         [ -f "$DOT" ] || continue
-
         CLEAN="${DOT#.}"
         mv "$DOT" "$CLEAN"
-
-        PNG="${CLEAN%.dot}.png"
-
-        dot -Tpng -Gdpi=150 -Nfontsize=11 "$CLEAN" -o "$PNG"
-
+        dot -Tpng -Gdpi=150 -Nfontsize=11 "$CLEAN" -o "$output"
         rm "$CLEAN"
     done
 }
@@ -64,8 +61,8 @@ run_pass() {
         opt --passes="mem2reg" "$DIR/original.ll" -S -o "$BEFORE"
 
         cd "$DIR"
-        generate_cfg "$BEFORE"
-        generate_cfg optimized.ll
+        generate_cfg "$BEFORE" original.png
+        generate_cfg optimized.ll optimized.png
         rm -f "$BEFORE"
         cd "$PROJECT"
     done

@@ -1,0 +1,14 @@
+[
+{
+  "directory": "/home/dunja/KK/projekat/llvm-passes/cmake-build-debug/licm",
+  "command": "/usr/bin/c++  -I/usr/lib/llvm-18/include -std=gnu++17 -fPIC   -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS  -fno-exceptions -funwind-tables -o CMakeFiles/LICM.dir/LICM.cpp.o -c /home/dunja/KK/projekat/llvm-passes/licm/LICM.cpp",
+  "file": "/home/dunja/KK/projekat/llvm-passes/licm/LICM.cpp",
+  "output": "licm/CMakeFiles/LICM.dir/LICM.cpp.o"
+},
+{
+  "directory": "/home/dunja/KK/projekat/llvm-passes/cmake-build-debug/jump-threading",
+  "command": "/usr/bin/c++  -I/usr/lib/llvm-18/include -std=gnu++17 -fPIC   -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS  -fno-exceptions -funwind-tables -o CMakeFiles/JumpThreading.dir/JumpThreading.cpp.o -c /home/dunja/KK/projekat/llvm-passes/jump-threading/JumpThreading.cpp",
+  "file": "/home/dunja/KK/projekat/llvm-passes/jump-threading/JumpThreading.cpp",
+  "output": "jump-threading/CMakeFiles/JumpThreading.dir/JumpThreading.cpp.o"
+}
+]
