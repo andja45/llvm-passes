@@ -13,14 +13,15 @@ using namespace llvm;
 
 struct ThreadCandidate {
     BasicBlock *Pred;
-    BasicBlock *Current;
-
     BranchInst *PredBranch;
+
+    BasicBlock *Current;
     BranchInst *CurrentBranch;
 
     bool TakenEdge;
 };
 
+// Checks whether two comparison instructions are equivalent.
 static bool sameComparison(ICmpInst* A, ICmpInst* B) {
 
     if(A->getPredicate() != B->getPredicate())
@@ -38,6 +39,7 @@ static bool sameComparison(ICmpInst* A, ICmpInst* B) {
     return OpA == OpB && A->getOperand(1) == B->getOperand(1);
 }
 
+// Returns the comparison instruction controlling the block branch.
 static ICmpInst* getCompare(BasicBlock* BB) {
 
     auto *Branch = dyn_cast<BranchInst>(BB->getTerminator());
@@ -48,6 +50,7 @@ static ICmpInst* getCompare(BasicBlock* BB) {
     return dyn_cast<ICmpInst>(Branch->getCondition());
 }
 
+// Skips an unconditional block with a single predecessor.
 static BasicBlock* skipUnconditionalBlock(BasicBlock* BB) {
 
     auto *Branch = dyn_cast<BranchInst>(BB->getTerminator());
@@ -58,26 +61,7 @@ static BasicBlock* skipUnconditionalBlock(BasicBlock* BB) {
     return BB->getSinglePredecessor();
 }
 
-static bool predecessorModifiesMemory(BasicBlock* Pred, Value* Memory) {
-
-    bool AfterCompare = false;
-
-    for(Instruction& I : *Pred) {
-        if(isa<ICmpInst>(&I))
-            AfterCompare = true;
-
-        if(!AfterCompare)
-            continue;
-
-        if(auto *Store = dyn_cast<StoreInst>(&I)) {
-            if(Store->getPointerOperand() == Memory)
-                return true;
-        }
-    }
-
-    return false;
-}
-
+// Checks whether the predecessor can be threaded through the current block.
 static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candidate) {
 
     // predecessor
@@ -103,11 +87,6 @@ static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candida
     if(!sameComparison(PredCmp, CurrentCmp))
         return false;
 
-    auto *Load = cast<LoadInst>(PredCmp->getOperand(0));
-
-    if(predecessorModifiesMemory(Pred, Load->getPointerOperand()))
-        return false;
-
     Candidate.Pred = Pred;
     Candidate.Current = BB;
 
@@ -119,6 +98,7 @@ static bool canThread(BasicBlock* Pred, BasicBlock* BB, ThreadCandidate &Candida
     return true;
 }
 
+// Finds all jump threading opportunities in the function.
 static void findThreadingOpportunities(Function &F,
     std::vector<ThreadCandidate>& Candidates) {
 
@@ -137,6 +117,7 @@ static void findThreadingOpportunities(Function &F,
     }
 }
 
+// Redirects a predecessor edge to bypass the threaded block.
 static bool threadCandidate(ThreadCandidate& C) {
 
     BasicBlock* Target = C.CurrentBranch->getSuccessor(C.TakenEdge ? 0 : 1);
@@ -165,6 +146,7 @@ static bool threadCandidate(ThreadCandidate& C) {
     return true;
 }
 
+// Applies all discovered threading opportunities.
 static bool processCandidates(std::vector<ThreadCandidate>& Candidates) {
 
     bool Changed = false;
