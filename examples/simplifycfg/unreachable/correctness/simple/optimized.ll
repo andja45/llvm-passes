@@ -3,8 +3,5 @@ source_filename = "/home/ana/Desktop/llvm-passes/examples/simplifycfg/unreachabl
 
 define i32 @unreachable_simple(i32 %x) {
 entry:
-  br label %live
-
-live:                                             ; preds = %entry
   ret i32 %x
 }
