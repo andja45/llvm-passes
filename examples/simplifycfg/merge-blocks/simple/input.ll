@@ -4,15 +4,16 @@ entry:
   br i1 %positive, label %prepare, label %return_zero
 
 prepare:
+  %prepared = add i32 %x, 1
   br label %process
 
 process:
-  %incremented = add i32 %x, 1
-  %doubled = mul i32 %incremented, 2
+  %processed = mul i32 %prepared, 2
   br label %finish
 
 finish:
-  ret i32 %doubled
+  %result = sub i32 %processed, 3
+  ret i32 %result
 
 return_zero:
   ret i32 0

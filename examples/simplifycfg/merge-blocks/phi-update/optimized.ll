@@ -11,9 +11,10 @@ prepare:                                          ; preds = %entry
   br label %exit
 
 fallback:                                         ; preds = %entry
+  %fallback_value = sub i32 %x, 1
   br label %exit
 
 exit:                                             ; preds = %fallback, %prepare
-  %result = phi i32 [ %doubled, %prepare ], [ 0, %fallback ]
+  %result = phi i32 [ %doubled, %prepare ], [ %fallback_value, %fallback ]
   ret i32 %result
 }

@@ -7,9 +7,10 @@ entry:
   br i1 %positive, label %prepare, label %return_zero
 
 prepare:                                          ; preds = %entry
-  %incremented = add i32 %x, 1
-  %doubled = mul i32 %incremented, 2
-  ret i32 %doubled
+  %prepared = add i32 %x, 1
+  %processed = mul i32 %prepared, 2
+  %result = sub i32 %processed, 3
+  ret i32 %result
 
 return_zero:                                      ; preds = %entry
   ret i32 0

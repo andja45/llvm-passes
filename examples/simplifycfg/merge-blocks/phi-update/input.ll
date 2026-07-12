@@ -12,10 +12,11 @@ process:
   br label %exit
 
 fallback:
+  %fallback_value = sub i32 %x, 1
   br label %exit
 
 exit:
   %result = phi i32 [ %doubled, %process ],
-                    [ 0, %fallback ]
+                    [ %fallback_value, %fallback ]
   ret i32 %result
 }
