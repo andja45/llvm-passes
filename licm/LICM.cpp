@@ -16,10 +16,11 @@
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 
-#define DEBUG_TYPE "licm"
+#define DEBUG_TYPE "licm" // with -debug-only=licm option
 
 using namespace llvm;
 
+// with --stats
 STATISTIC(NumHoisted, "Number of instructions hoisted out of loops");
 STATISTIC(NumSunk, "Number of instructions sunk out of loops");
 STATISTIC(NumPromoted, "Number of memory locations promoted to registers");
@@ -39,7 +40,7 @@ static bool isLoopInvariant(Value *V, Loop &L) {
     return true;
 }
 
-// avoids O(n^2) rescanning per hoisting candidate, collects beforehand in O(n)
+// avoids O(n^2) rescanning per candidate, collects beforehand in O(n)
 static void collectLoopMemoryOps(Loop &L, SmallVector<LoadInst*, 8> &LoopLoads, SmallVector<StoreInst*, 8> &LoopStores,
                                  SmallVector<CallBase*, 8> &LoopCalls) {
     for (BasicBlock *BB : L.blocks())
@@ -58,7 +59,7 @@ static bool canHoistCall(CallBase &CB, Loop &L, AAResults &AA, ArrayRef<StoreIns
     if (CB.isInlineAsm())         return false;
     if (CB.isConvergent())        return false; // GPU thread-sensitive
     if (!CB.doesNotThrow())       return false;
-    if (!CB.onlyReadsMemory())    return false;
+    if (!CB.onlyReadsMemory())    return false; // readonly and readnone
 
     for (Value *Arg : CB.args())
         if (!isLoopInvariant(Arg, L))
@@ -111,7 +112,7 @@ static bool isSafeToHoist(Instruction &I, Loop &L, DominatorTree &DT) {
 
     // unsafe instructions require dominating all exits which ensures no new execution is introduced
     if (!isSafeToSpeculativelyExecute(&I)) {
-        SmallVector<BasicBlock *, 8> ExitBlocks;
+        SmallVector<BasicBlock*, 8> ExitBlocks;
         L.getExitBlocks(ExitBlocks);
         for (BasicBlock *EB : ExitBlocks)
             if (!DT.dominates(I.getParent(), EB))
@@ -127,9 +128,10 @@ static void hoistInstruction(Instruction &I, BasicBlock *Preheader) {
     LLVM_DEBUG(dbgs() << "[licm] hoisted: " << I << "\n");
 }
 
-static BasicBlock *ensurePreheader(Loop &L, DominatorTree &DT, LoopInfo &LI) {
+static BasicBlock *ensurePreheader(Loop &L, DominatorTree &DT, LoopInfo &LI, bool &Inserted) {
     if (BasicBlock *PH = L.getLoopPreheader())
         return PH;
+    Inserted = true;
     return InsertPreheaderForLoop(&L, &DT, &LI, nullptr, false);
 }
 
@@ -165,7 +167,7 @@ static bool tryPromoteMemory(Loop &L, AAResults &AA, DominatorTree &DT, BasicBlo
 
         StoreInst *StoreToPromote = It->second[0];
 
-        // store must run on every iteration if the store is in a conditional branch,
+        // store must run on every iteration - if the store is in a conditional branch,
         // some iterations skip it and the PHI picks up a stale value from a previous iteration
         if (!DT.dominates(StoreToPromote->getParent(), Latch)) continue;
 
@@ -382,7 +384,7 @@ static bool hoistSEUnlocked(Loop &L, ScalarEvolution &SE, DominatorTree &DT, Bas
         if (!DT.dominates(BB, Latch)) continue; // every path from header to latch goes through BB
         for (Instruction &I : *BB) {
             if (I.isTerminator() || isa<PHINode>(I) || isa<LoadInst>(I) ||
-                isa<StoreInst>(I) ||  // side effect — N iterations must produce N writes, can't reduce to one
+                isa<StoreInst>(I) ||  // side effect - n iterations must produce n writes, can't reduce to one
                 isa<CallBase>(I)) continue;
 
             if (isSafeToSpeculativelyExecute(&I)) continue; // regular hoisting handles these
@@ -476,7 +478,8 @@ struct LICMPass : PassInfoMixin<LICMPass> {
     PreservedAnalyses run(Loop &L, LoopAnalysisManager &LAM, LoopStandardAnalysisResults &AR, LPMUpdater &U) {
         LLVM_DEBUG(dbgs() << "[licm] running on loop: " << L.getName() << "\n");
 
-        BasicBlock *Preheader = ensurePreheader(L, AR.DT, AR.LI);
+        bool PreheaderInserted = false;
+        BasicBlock *Preheader = ensurePreheader(L, AR.DT, AR.LI, PreheaderInserted);
         if (!Preheader) {
             LLVM_DEBUG(dbgs() << "[licm] skipping loop: could not get preheader\n");
             return PreservedAnalyses::all();
@@ -528,7 +531,7 @@ struct LICMPass : PassInfoMixin<LICMPass> {
         // fix LCSSA after all transformations (exit PHIs mark where loop-internal values leave the loop)
         formLCSSARecursively(L, AR.DT, &AR.LI, &AR.SE);
 
-        return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+        return (Changed || PreheaderInserted) ? PreservedAnalyses::none() : PreservedAnalyses::all();
     }
 };
 
