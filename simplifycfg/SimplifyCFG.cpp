@@ -1,5 +1,6 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -17,6 +18,10 @@ static void simplifyBlockPHIs(BasicBlock &BB);
 static void updateSuccessorPHIs(BasicBlock &BB, BasicBlock &Pred);
 static void moveInstructions(BasicBlock &From, BasicBlock &To);
 static void mergeBlocks(BasicBlock &BB, BasicBlock &Pred);
+
+static bool isTrivialBranchBlock(BasicBlock &BB);
+static void updateSuccessorPHIsForTrivialBlock(BasicBlock &BB, ArrayRef<BasicBlock *> Predecessors);
+static void redirectPredecessors(BasicBlock &BB, BasicBlock &Successor, ArrayRef<BasicBlock *> Predecessors);
 
 static bool removeUnreachableBlocks(Function &F) {
     if (F.empty())
@@ -56,7 +61,6 @@ static bool removeUnreachableBlocks(Function &F) {
 
     for(BasicBlock *BB : DeadBlocks)
         BB->dropAllReferences();
-
     for(BasicBlock *BB : DeadBlocks)
         BB->eraseFromParent();
 
@@ -87,12 +91,46 @@ static bool mergeBasicBlocks(Function &F) {
     return Changed;
 }
 
+static bool removeTrivialBranchBlocks(Function &F) {
+    bool Changed = false;
+    bool LocalChange = true;
+
+    while (LocalChange) {
+        LocalChange = false;
+
+        for (BasicBlock &BB : F) {
+            if (!isTrivialBranchBlock(BB))
+                continue;
+
+            auto *Branch = cast<BranchInst>(BB.getTerminator());
+            BasicBlock *Successor = Branch->getSuccessor(0);
+
+            SmallVector<BasicBlock *, 8> Predecessors;
+            for (BasicBlock *Pred : predecessors(&BB))
+                Predecessors.push_back(Pred);
+
+            updateSuccessorPHIsForTrivialBlock(BB, Predecessors);
+            redirectPredecessors(BB, *Successor, Predecessors);
+
+            BB.dropAllReferences();
+            BB.eraseFromParent();
+
+            Changed = true;
+            LocalChange = true;
+            break;
+        }
+    }
+
+    return Changed;
+}
+
 struct SimplifyCFGPass : PassInfoMixin<SimplifyCFGPass> {
 
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
         bool Changed = false;
         Changed |= removeUnreachableBlocks(F);
         Changed |= mergeBasicBlocks(F);
+        Changed |= removeTrivialBranchBlocks(F);
 
         if (Changed)
             return PreservedAnalyses::none();
@@ -103,7 +141,6 @@ struct SimplifyCFGPass : PassInfoMixin<SimplifyCFGPass> {
 
 static bool canMergeBlocks(BasicBlock &BB, BasicBlock *&Pred) {
     Pred = BB.getSinglePredecessor();
-
     if (!Pred || Pred == &BB)
         return false;
 
@@ -121,7 +158,7 @@ static void mergeBlocks(BasicBlock &BB, BasicBlock &Pred) {
     Pred.getTerminator()->eraseFromParent();
 
     moveInstructions(BB, Pred);
-    
+
     BB.eraseFromParent();
 }
 
@@ -144,6 +181,49 @@ static void moveInstructions(BasicBlock &From, BasicBlock &To) {
     while (!From.empty()) {
         Instruction &I = From.front();
         I.moveBefore(To, To.end());
+    }
+}
+
+
+static bool isTrivialBranchBlock(BasicBlock &BB) {
+    if (&BB == &BB.getParent()->getEntryBlock())
+        return false;
+    if (pred_empty(&BB))
+        return false;
+    if (BB.size() != 1)
+        return false;
+
+    auto *Branch = dyn_cast<BranchInst>(BB.getTerminator());
+    if (!Branch || !Branch->isUnconditional())
+        return false;
+
+    return Branch->getSuccessor(0) != &BB;
+}
+
+static void updateSuccessorPHIsForTrivialBlock(BasicBlock &BB, ArrayRef<BasicBlock *> Predecessors) {
+    BasicBlock *Successor = cast<BranchInst>(BB.getTerminator())->getSuccessor(0);
+
+    for (PHINode &Phi : Successor->phis()) {
+        int IncomingIndex = Phi.getBasicBlockIndex(&BB);
+        if (IncomingIndex < 0)
+            continue;
+
+        Value *IncomingValue = Phi.getIncomingValue(static_cast<unsigned>(IncomingIndex));
+        Phi.removeIncomingValue(static_cast<unsigned>(IncomingIndex), false);
+
+        for (BasicBlock *Pred : Predecessors)
+            Phi.addIncoming(IncomingValue, Pred);
+    }
+}
+
+static void redirectPredecessors(BasicBlock &BB, BasicBlock &Successor, ArrayRef<BasicBlock *> Predecessors) {
+    for (BasicBlock *Pred : Predecessors) {
+        Instruction *Terminator = Pred->getTerminator();
+
+        for (unsigned i = 0;i < Terminator->getNumSuccessors();++i) {
+            if (Terminator->getSuccessor(i) == &BB)
+                Terminator->setSuccessor(i, &Successor);
+        }
     }
 }
 
