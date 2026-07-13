@@ -11,11 +11,11 @@ using namespace llvm;
 
 class DSEPass : public PassInfoMixin<DSEPass> {
 private:
-    bool hasLoadBetween(StoreInst *OldStore, StoreInst *NewStore) {
-
+    bool hasUseBetween(StoreInst *OldStore, StoreInst *NewStore) {
         BasicBlock *BB = OldStore->getParent();
 
         bool between = false;
+        Value *Ptr = OldStore->getPointerOperand();
 
         for (Instruction &I : *BB) {
 
@@ -30,12 +30,20 @@ private:
 
             if (between) {
                 if (auto *Load = dyn_cast<LoadInst>(&I)) {
-
                     if (Load->getPointerOperand() ==
-                        OldStore->getPointerOperand()) {
-
+                        Ptr) {
+                        errs() << "Found load between stores\n";
                         return true;
+                    }
+                }
+
+                if (auto *Call = dyn_cast<CallInst>(&I)) {
+                    for (Use &Arg : Call->args()) {
+                        if (Arg.get() == Ptr) {
+                            errs() << "Pointer passed to function call\n";
+                            return true;
                         }
+                    }
                 }
             }
         }
@@ -49,31 +57,39 @@ public:
         DenseMap<Value*, StoreInst*> LastStore;
 
         for (BasicBlock &BB : F) {
-
             for (Instruction &I : BB) {
-
                 if (auto *Store = dyn_cast<StoreInst>(&I)) {
-
                     Value *Ptr = Store->getPointerOperand();
 
                     if (LastStore.count(Ptr)) {
-
                         StoreInst *Previous = LastStore[Ptr];
 
-                        if (!hasLoadBetween(Previous, Store)) {
-
+                        if (!hasUseBetween(Previous, Store)) {
                             errs() << "Dead store candidate:\n";
-
                             Previous->print(errs());
                             errs() << "\n";
                             ToRemove.push_back(Previous);
                         } else {
-
-                            errs() << "Store is still needed because of load\n";
+                            errs() << "Store kept because the value is used";
                         }
                     }
 
                     LastStore[Ptr] = Store;
+                }
+
+                else if (auto *Call = dyn_cast<CallInst>(&I)) {
+                    for (Use &Arg : Call->args()) {
+                        Value *Ptr = Arg.get();
+                        if (LastStore.count(Ptr)) {
+                            errs()
+                                << "Clearing stored value because of call: ";
+
+                            Ptr->print(errs());
+                            errs() << "\n";
+
+                            LastStore.erase(Ptr);
+                        }
+                    }
                 }
             }
         }
