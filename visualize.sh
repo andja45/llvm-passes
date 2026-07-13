@@ -19,6 +19,7 @@ PASSES=("${!PLUGIN_NAME[@]}")
 
 generate_cfg() {
     local input="$1"
+    local prefix="$2"
 
     opt -passes=dot-cfg -disable-output "$input" 2>/dev/null
 
@@ -28,7 +29,7 @@ generate_cfg() {
         CLEAN="${DOT#.}"
         mv "$DOT" "$CLEAN"
 
-        PNG="${CLEAN%.dot}.png"
+        PNG="${prefix}-${CLEAN%.dot}.png"
 
         dot -Tpng -Gdpi=150 -Nfontsize=11 "$CLEAN" -o "$PNG"
 
@@ -68,8 +69,8 @@ run_pass() {
         opt --passes="mem2reg" "$DIR/original.ll" -S -o "$BEFORE"
 
         cd "$DIR"
-        generate_cfg "$BEFORE"
-        generate_cfg optimized.ll
+        generate_cfg "$BEFORE" before
+        generate_cfg optimized.ll after
         rm -f "$BEFORE"
         cd "$PROJECT"
     done

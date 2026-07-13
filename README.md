@@ -107,7 +107,7 @@ opt --load-pass-plugin=./cmake-build-debug/licm/LICM.so \
 ```
 
 ```bash
-# compile to IR (replace <example> with e.g. basic, different-condition, ...)
+# compile to IR (replace <example> with e.g. basic, different-condition, different-variable, goto)
 clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone -fno-discard-value-names \
     examples/jump-threading/<example>/input.c \
     -o examples/jump-threading/<example>/original.ll
