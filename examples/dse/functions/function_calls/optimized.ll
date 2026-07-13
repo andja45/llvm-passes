@@ -1,5 +1,5 @@
-; ModuleID = 'function_calls.c'
-source_filename = "function_calls.c"
+; ModuleID = '/home/natalija/Desktop/faks/kk/llvm-passes-project/examples/dse/functions/function_calls/original.ll'
+source_filename = "/home/natalija/Desktop/faks/kk/llvm-passes-project/examples/dse/functions/function_calls/input.c"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
 
@@ -7,20 +7,19 @@ target triple = "x86_64-pc-linux-gnu"
 
 ; Function Attrs: noinline nounwind uwtable
 define dso_local void @foo() #0 {
-  store i32 100, ptr @global, align 4
+entry:
   ret void
 }
 
 ; Function Attrs: noinline nounwind uwtable
 define dso_local i32 @main() #0 {
-  %1 = alloca i32, align 4
-  %2 = alloca i32, align 4
-  store i32 0, ptr %1, align 4
-  store i32 5, ptr %2, align 4
+entry:
+  %retval = alloca i32, align 4
+  %x = alloca i32, align 4
   call void @foo()
-  store i32 10, ptr %2, align 4
-  %3 = load i32, ptr %2, align 4
-  ret i32 %3
+  store i32 10, ptr %x, align 4
+  %0 = load i32, ptr %x, align 4
+  ret i32 %0
 }
 
 attributes #0 = { noinline nounwind uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
