@@ -124,6 +124,26 @@ static bool removeTrivialBranchBlocks(Function &F) {
     return Changed;
 }
 
+static bool simplifySinglePredecessorPHIs(Function &F) {
+    bool Changed = false;
+
+    for (BasicBlock &BB : F) {
+        if (!BB.getSinglePredecessor())
+            continue;
+
+        while (auto *Phi = dyn_cast<PHINode>(&BB.front())) {
+            Value *IncomingValue = Phi->getIncomingValue(0);
+
+            Phi->replaceAllUsesWith(IncomingValue);
+            Phi->eraseFromParent();
+
+            Changed = true;
+        }
+    }
+
+    return Changed;
+}
+
 struct SimplifyCFGPass : PassInfoMixin<SimplifyCFGPass> {
 
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
@@ -131,6 +151,7 @@ struct SimplifyCFGPass : PassInfoMixin<SimplifyCFGPass> {
         Changed |= removeUnreachableBlocks(F);
         Changed |= mergeBasicBlocks(F);
         Changed |= removeTrivialBranchBlocks(F);
+        Changed |= simplifySinglePredecessorPHIs(F);
 
         if (Changed)
             return PreservedAnalyses::none();
