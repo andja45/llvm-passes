@@ -4,8 +4,14 @@ set -euo pipefail
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
 
 # register passes here
-declare -A PLUGIN_NAME=([licm]="LICM")
-declare -A OPT_PASSES=([licm]="mem2reg,loop(licm-pass)")
+declare -A PLUGIN_NAME=(
+    [licm]="LICM"
+    [dse]="DSE"
+)
+declare -A OPT_PASSES=(
+    [licm]="mem2reg,loop(licm-pass)"
+    [dse]="my-dse"
+)
 
 PASSES=("${!PLUGIN_NAME[@]}")
 [ $# -gt 0 ] && PASSES=("$@")
@@ -33,14 +39,14 @@ run_pass() {
         return
     fi
 
-    for DIR in "$PROJECT/examples/$PASS"/*/; do
-        [ -f "$DIR/input.c" ] || continue
+    while IFS= read -r INPUT; do
+        DIR=$(dirname "$INPUT")
         NAME=$(basename "$DIR")
         echo "  --> $NAME"
 
         clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone \
               -fno-discard-value-names \
-              "$DIR/input.c" -o "$DIR/original.ll"
+              "$INPUT" -o "$DIR/original.ll"
 
         if ! opt --load-pass-plugin="$PLUGIN" \
                 --passes="${OPT_PASSES[$PASS]}" \
@@ -58,7 +64,8 @@ run_pass() {
         generate_cfg optimized.ll optimized.png
         rm -f "$BEFORE"
         cd "$PROJECT"
-    done
+
+    done < <(find "$PROJECT/examples/$PASS" -name input.c)
 }
 
 for PASS in "${PASSES[@]}"; do
