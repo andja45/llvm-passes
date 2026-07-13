@@ -29,7 +29,6 @@ for.cond:                                         ; preds = %for.inc, %entry
   br i1 %cmp, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond
-  %add1 = add nsw i64 %i.0, %offset
   %gep.var = getelementptr float, ptr %gep.base, i64 %i.0
   %1 = load float, ptr %gep.var, align 4
   %recip.mul = fmul float %1, %reassoc1

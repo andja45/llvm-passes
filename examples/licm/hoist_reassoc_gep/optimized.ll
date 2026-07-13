@@ -15,7 +15,6 @@ for.cond:                                         ; preds = %for.inc, %entry
   br i1 %cmp, label %for.body, label %for.end
 
 for.body:                                         ; preds = %for.cond
-  %add = add nsw i64 %i.0, %offset
   %gep.var = getelementptr float, ptr %gep.base, i64 %i.0
   %0 = load float, ptr %gep.var, align 4
   %arrayidx1 = getelementptr inbounds float, ptr %dst, i64 %i.0

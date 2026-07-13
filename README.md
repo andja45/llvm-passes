@@ -31,7 +31,7 @@ transformation fires; hoisting can expose new invariants each pass.
 | **Statistics + debug** - pass statistics and debug logging                                            | - |
 
 `*` LLVM covers do-while via dominator-based execution guarantees; the zero-trip
-path blocks that for for/while. SE proving TC > 0 guarantees the first
+path blocks that for for/while loops. SE proving TC > 0 guarantees the first
 iteration; every path from header to latch through BB guarantees no iteration
 skips it - covers the case LLVM conservatively skips.
 
