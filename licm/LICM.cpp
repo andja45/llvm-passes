@@ -444,6 +444,10 @@ static bool sinkSEUnlocked(Loop &L, ScalarEvolution &SE, DominatorTree &DT) {
     BasicBlock *ExitBlock = L.getExitBlock();
     if (!ExitBlock) return false;
 
+    // don't sink if EB is reachable without going through the loop - sinking would introduce new instructions
+    BasicBlock *Preheader = L.getLoopPreheader();
+    if (!Preheader || !DT.dominates(Preheader, ExitBlock)) return false;
+
     BasicBlock *Latch = L.getLoopLatch();
     if (!Latch) return false;
 
