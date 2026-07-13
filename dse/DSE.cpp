@@ -51,6 +51,37 @@ private:
         return false;
     }
 
+    bool hasUseAfter(StoreInst *Store) {
+        Value *Ptr = Store->getPointerOperand();
+        bool found = false;
+
+        for (BasicBlock &BB : *Store->getFunction()) {
+            for (Instruction &I : BB) {
+                if (&I == Store) {
+                    found = true;
+                    continue;
+                }
+
+                if (!found)
+                    continue;
+
+                if (auto *Load = dyn_cast<LoadInst>(&I)) {
+                    if (Load->getPointerOperand() == Ptr)
+                        return true;
+                }
+
+                if (auto *Call = dyn_cast<CallInst>(&I)) {
+                    for (Use &Arg : Call->args()) {
+                        if (Arg.get() == Ptr)
+                            return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
 public:
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
         SmallVector<Instruction *, 16> ToRemove;
@@ -70,7 +101,7 @@ public:
                             errs() << "\n";
                             ToRemove.push_back(Previous);
                         } else {
-                            errs() << "Store kept because the value is used";
+                            errs() << "Store kept because the value is used\n";
                         }
                     }
 
@@ -91,6 +122,18 @@ public:
                         }
                     }
                 }
+            }
+        }
+
+        for (auto &Entry : LastStore) {
+            StoreInst *Store = Entry.second;
+
+            if (!hasUseAfter(Store)) {
+                errs() << "Dead store at end:\n";
+                Store->print(errs());
+                errs() << "\n";
+
+                ToRemove.push_back(Store);
             }
         }
 
