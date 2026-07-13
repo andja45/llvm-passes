@@ -1,4 +1,5 @@
 #include "llvm/IR/PassManager.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -6,12 +7,15 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
-using namespace llvm;
 
+using namespace llvm;
 
 class DSEPass : public PassInfoMixin<DSEPass> {
 private:
-    bool hasUseBetween(StoreInst *OldStore, StoreInst *NewStore) {
+    static bool hasUseBetween(StoreInst *OldStore, StoreInst *NewStore) {
+        if (OldStore->getParent() != NewStore->getParent())
+            return true;
+
         BasicBlock *BB = OldStore->getParent();
 
         bool between = false;
@@ -51,7 +55,7 @@ private:
         return false;
     }
 
-    bool hasUseAfter(StoreInst *Store) {
+    static bool hasUseAfter(StoreInst *Store) {
         Value *Ptr = Store->getPointerOperand();
         bool found = false;
 
