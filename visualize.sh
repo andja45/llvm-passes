@@ -3,73 +3,174 @@ set -euo pipefail
 
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
 
-# register passes here
+# Register passes here
 declare -A PLUGIN_NAME=(
     [licm]="LICM"
+    [simplifycfg]="SimplifyCFG"
+    [jump-threading]="JumpThreading"
     [dse]="DSE"
 )
+
 declare -A OPT_PASSES=(
     [licm]="mem2reg,loop(licm-pass)"
+    [simplifycfg]="simplifycfg-pass"
+    [jump-threading]="my-jump-threading"
     [dse]="my-dse"
 )
 
 PASSES=("${!PLUGIN_NAME[@]}")
 [ $# -gt 0 ] && PASSES=("$@")
 
+# Generates CFG visualizations
+#
+# For a module containing one function:
+#   original.png
+#   optimized.png
+#
+# For a module containing multiple functions:
+#   original-<function>.png
+#   optimized-<function>.png
 generate_cfg() {
-    local input="$1" output="$2"
+    local input="$1"
+    local prefix="$2"
+
     opt -passes=dot-cfg -disable-output "$input" 2>/dev/null
-    for DOT in .*.dot; do
-        [ -f "$DOT" ] || continue
-        CLEAN="${DOT#.}"
-        mv "$DOT" "$CLEAN"
-        dot -Tpng -Gdpi=150 -Nfontsize=11 "$CLEAN" -o "$output"
-        rm "$CLEAN"
+
+    # Prevent an unmatched pattern from remaining as the literal string ".*.dot"
+    shopt -s nullglob
+    local dot_files=(.*.dot)
+    shopt -u nullglob
+
+    local count="${#dot_files[@]}"
+
+    if [ "$count" -eq 0 ]; then
+        return
+    fi
+
+    for dot_file in "${dot_files[@]}"; do
+        local clean="${dot_file#.}"
+        local base="${clean%.dot}"
+        local output
+
+        mv "$dot_file" "$clean"
+
+        if [ "$count" -eq 1 ]; then
+            output="${prefix}.png"
+        else
+            output="${prefix}-${base}.png"
+        fi
+
+        dot -Tpng -Gdpi=150 -Nfontsize=11 \
+            "$clean" \
+            -o "$output"
+
+        rm "$clean"
     done
 }
 
 run_pass() {
-    local PASS="$1"
-    local PLUGIN="$PROJECT/cmake-build-debug/$PASS/${PLUGIN_NAME[$PASS]}.so"
+    local pass="$1"
 
-    echo "==> $PASS"
-
-    if [ ! -f "$PLUGIN" ]; then
-        echo "  [!] plugin not found — run: cmake --build cmake-build-debug --target ${PLUGIN_NAME[$PASS]}"
+    if [ -z "${PLUGIN_NAME[$pass]+x}" ] ||
+       [ -z "${OPT_PASSES[$pass]+x}" ]; then
+        echo "  [!] unknown pass: $pass"
         return
     fi
 
-    while IFS= read -r INPUT; do
-        DIR=$(dirname "$INPUT")
-        NAME=$(basename "$DIR")
-        echo "  --> $NAME"
+    local plugin="$PROJECT/cmake-build-debug/$pass/${PLUGIN_NAME[$pass]}.so"
+    local examples_dir="$PROJECT/examples/$pass"
 
-        clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone \
-              -fno-discard-value-names \
-              "$INPUT" -o "$DIR/original.ll"
+    echo "==> $pass"
 
-        if ! opt --load-pass-plugin="$PLUGIN" \
-                --passes="${OPT_PASSES[$PASS]}" \
-                "$DIR/original.ll" -S -o "$DIR/optimized.ll" \
-                > "$DIR/pass.log" 2>&1; then
-            echo "  [!] pass failed — see $DIR/pass.log"
+    if [ ! -f "$plugin" ]; then
+        echo "  [!] plugin not found — run: cmake --build cmake-build-debug --target ${PLUGIN_NAME[$pass]}"
+        return
+    fi
+
+    if [ ! -d "$examples_dir" ]; then
+        echo "  [!] examples directory not found: $examples_dir"
+        return
+    fi
+
+    # Avoid processing the same directory twice if it contains both input.c
+    # and input.ll. input.c takes precedence in that case
+    declare -A processed_dirs=()
+
+    while IFS= read -r -d '' input; do
+        local dir
+        local name
+        local before
+
+        dir="$(dirname "$input")"
+
+        if [ -n "${processed_dirs[$dir]+x}" ]; then
             continue
         fi
 
-        BEFORE=$(mktemp --suffix=.ll)
-        opt --passes="mem2reg" "$DIR/original.ll" -S -o "$BEFORE"
+        processed_dirs["$dir"]=1
 
-        cd "$DIR"
-        generate_cfg "$BEFORE" original.png
-        generate_cfg optimized.ll optimized.png
-        rm -f "$BEFORE"
-        cd "$PROJECT"
+        name="${dir#"$examples_dir/"}"
+        echo "  --> $name"
 
-    done < <(find "$PROJECT/examples/$PASS" -name input.c)
+        if [ -f "$dir/input.c" ]; then
+            clang -S -emit-llvm -O0 \
+                -Xclang -disable-O0-optnone \
+                -fno-discard-value-names \
+                "$dir/input.c" \
+                -o "$dir/original.ll"
+        elif [ -f "$dir/input.ll" ]; then
+            cp "$dir/input.ll" "$dir/original.ll"
+        else
+            continue
+        fi
+
+        if ! opt \
+            --load-pass-plugin="$plugin" \
+            --passes="${OPT_PASSES[$pass]}" \
+            "$dir/original.ll" \
+            -S \
+            -o "$dir/optimized.ll" \
+            > "$dir/pass.log" 2>&1; then
+
+            echo "  [!] pass failed — see $dir/pass.log"
+            continue
+        fi
+
+        before="$(mktemp --suffix=.ll)"
+
+        opt --passes="mem2reg" \
+            "$dir/original.ll" \
+            -S \
+            -o "$before"
+
+        (
+            cd "$dir"
+
+            # Remove old visualizations so stale images do not remain after
+            # function names or the number of functions change
+            rm -f \
+                original.png \
+                optimized.png \
+                original-*.png \
+                optimized-*.png \
+                before-*.png \
+                after-*.png
+
+            generate_cfg "$before" original
+            generate_cfg optimized.ll optimized
+        )
+
+        rm -f "$before"
+    done < <(
+        find "$examples_dir" \
+            -type f \
+            \( -name "input.c" -o -name "input.ll" \) \
+            -print0
+    )
 }
 
-for PASS in "${PASSES[@]}"; do
-    run_pass "$PASS"
+for pass in "${PASSES[@]}"; do
+    run_pass "$pass"
 done
 
 echo "Done."
