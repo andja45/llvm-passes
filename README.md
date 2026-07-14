@@ -7,7 +7,7 @@ DominatorTree, AliasAnalysis, ScalarEvolution, and LoopInfo.
 LLVM 18 · C++17 · CMake · New Pass Manager · Pass Plugin API
 
 **Pass focus:**  
-Loop-Invariant Code Motion · [Pass 2] · [Pass 3] · [Pass 4]
+Loop-Invariant Code Motion · Jump Threading · SimplifyCFG · [Pass 4]
 
 ---
 
@@ -58,13 +58,22 @@ See [jump-threading/README.md](jump-threading/README.md) for full breakdown with
 
 ---
 
-## [Pass Name] — [one-line description]
+## SimplifyCFG — Control-flow graph simplification
 
-[Brief description of what the pass optimizes and how.]
+Performs a sequence of lightweight CFG simplifications to eliminate redundant
+basic blocks and simplify SSA form.
 
-**Tech focus:** [analyses / IR constructs used]
+| Feature | LLVM IR |
+|----------|---------|
+| **Unreachable block removal** — remove unreachable basic blocks and update successor PHI nodes | BasicBlock · PHI |
+| **Basic block merging** — merge consecutive basic blocks when CFG structure allows | BasicBlock · BranchInst · PHI |
+| **Trivial branch elimination** — remove blocks containing only an unconditional branch | BranchInst · PHI |
+| **Single-predecessor PHI simplification** — replace PHI nodes with their incoming value in blocks with a single predecessor | PHINode |
 
-See [pass-dir/README.md] for full breakdown.
+**Tech focus:**  
+LLVM IR · BasicBlock · BranchInst · PHINode · SSA
+
+See [simplifycfg/README.md](simplifycfg/README.md) for full breakdown with before/after IR and CFG.
 
 ---
 
@@ -126,6 +135,6 @@ opt --load-pass-plugin=./cmake-build-debug/jump-threading/JumpThreading.so \
 | Pass | Author |
 |---|---|
 | LICM | [Andjela Spasic](https://github.com/andja45) |
+| SimplifyCFG | [Ana Stevanovic](https://github.com/AnaStevanovic) |
 | Jump Threading | [Dunja Milenkovic](https://github.com/DunjaMilenkovic) |
-| [Pass 3] | [[Name]](https://github.com/username) |
 | [Pass 4] | [[Name]](https://github.com/username) |
