@@ -146,6 +146,6 @@ opt --load-pass-plugin=./cmake-build-debug/jump-threading/JumpThreading.so \
 | Pass | Author |
 |---|---|
 | LICM | [Andjela Spasic](https://github.com/andja45) |
-| SimplifyCFG | [Ana Stevanovic](https://github.com/AnaStevanovic) |
 | Jump Threading | [Dunja Milenkovic](https://github.com/DunjaMilenkovic) |
+| SimplifyCFG | [Ana Stevanovic](https://github.com/AnaStevanovic) |
 | DSE | [Natalija Pavlicevic](https://github.com/natalijapavlicevic) |
