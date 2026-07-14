@@ -7,7 +7,7 @@ DominatorTree, AliasAnalysis, ScalarEvolution, and LoopInfo.
 LLVM 18 · C++17 · CMake · New Pass Manager · Pass Plugin API
 
 **Pass focus:**  
-Loop-Invariant Code Motion · Jump Threading · SimplifyCFG · [Pass 4]
+Loop-Invariant Code Motion · Jump Threading · SimplifyCFG · DSE
 
 ---
 
