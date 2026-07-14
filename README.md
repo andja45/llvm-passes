@@ -39,17 +39,26 @@ See [licm/README.md](licm/README.md) for full breakdown with before/after IR and
 
 ---
 
-## [Pass Name] - [one-line description]
+## Jump Threading  — Eliminate redundant conditional branches
 
-[Brief description of what the pass optimizes and how.]
+Detects repeated conditional branches evaluating the same comparison and redirects
+CFG edges to bypass redundant basic blocks.
 
-**Tech focus:** [analyses / IR constructs used]
+**Tech focus:** CFG · LLVM IR · BranchInst · ICmpInst
 
-See [pass-dir/README.md] for full breakdown.
+| Feature | Analyses |
+|-----------------------------------------------------------------------------------------------------|--|
+| **Threading candidate detection** — find predecessor/current block pairs with equivalent conditions | CFG |
+| **Comparison matching** — verify identical comparison predicate, variable and constant              | LLVM IR |
+| **Edge redirection** — redirect predecessor branch to the final destination                         | CFG |
+| **Redundant branch elimination** — bypass redundant conditional blocks                                         | CFG |
+| **Debug logging** — print detected candidates and performed transformations | — |
+
+See [jump-threading/README.md](jump-threading/README.md) for full breakdown with before/after IR and CFG.
 
 ---
 
-## [Pass Name] - [one-line description]
+## [Pass Name] — [one-line description]
 
 [Brief description of what the pass optimizes and how.]
 
@@ -77,10 +86,10 @@ See [pass-dir/README.md] for full breakdown.
 git clone https://github.com/andja45/llvm-passes.git
 cd llvm-passes
 cmake -B cmake-build-debug
-cmake --build cmake-build-debug
+cmake --build cmake-build-debug --target LICM
 ```
 
-Run all examples - generates before/after IR and CFG PNGs for every feature:
+Run all examples — generates before/after IR and CFG PNGs for every feature:
 ```bash
 ./visualize.sh
 ```
@@ -97,6 +106,19 @@ opt --load-pass-plugin=./cmake-build-debug/licm/LICM.so \
     examples/licm/<example>/original.ll -S -o examples/licm/<example>/optimized.ll
 ```
 
+```bash
+# compile to IR (replace <example> with e.g. basic, different-condition, different-variable, goto)
+clang -S -emit-llvm -O0 -Xclang -disable-O0-optnone -fno-discard-value-names \
+    examples/jump-threading/<example>/input.c \
+    -o examples/jump-threading/<example>/original.ll
+
+# run pass
+opt --load-pass-plugin=./cmake-build-debug/jump-threading/JumpThreading.so \
+    --passes="my-jump-threading" \
+    examples/jump-threading/<example>/original.ll \
+    -S -o examples/jump-threading/<example>/optimized.ll
+```
+
 ---
 
 ## Authors
@@ -104,6 +126,6 @@ opt --load-pass-plugin=./cmake-build-debug/licm/LICM.so \
 | Pass | Author |
 |---|---|
 | LICM | [Andjela Spasic](https://github.com/andja45) |
-| [Pass 2] | [[Name]](https://github.com/username) |
+| Jump Threading | [Dunja Milenkovic](https://github.com/DunjaMilenkovic) |
 | [Pass 3] | [[Name]](https://github.com/username) |
 | [Pass 4] | [[Name]](https://github.com/username) |

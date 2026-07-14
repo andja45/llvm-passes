@@ -1,0 +1,5 @@
+Registering plugin
+Visiting function: foo
+Found 0 threading candidate(s)
+Visiting function: main
+Found 0 threading candidate(s)

@@ -1,25 +1,20 @@
 #!/bin/bash
+
+echo "USING JUMP-THREADING VISUALIZE.SH"
+
 set -euo pipefail
 
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
 
 # register passes here
-declare -A PLUGIN_NAME=(
-    [licm]="LICM"
-    [jump-threading]="JumpThreading"    
-)
-
-declare -A OPT_PASSES=(
-    [licm]="mem2reg,loop(licm-pass)"
-    [jump-threading]="my-jump-threading"    
-)
+declare -A PLUGIN_NAME=([licm]="LICM")
+declare -A OPT_PASSES=([licm]="mem2reg,loop(licm-pass)")
 
 PASSES=("${!PLUGIN_NAME[@]}")
 [ $# -gt 0 ] && PASSES=("$@")
 
 generate_cfg() {
     local input="$1"
-    local prefix="$2"
 
     opt -passes=dot-cfg -disable-output "$input" 2>/dev/null
 
@@ -29,7 +24,7 @@ generate_cfg() {
         CLEAN="${DOT#.}"
         mv "$DOT" "$CLEAN"
 
-        PNG="${prefix}-${CLEAN%.dot}.png"
+        PNG="${CLEAN%.dot}.png"
 
         dot -Tpng -Gdpi=150 -Nfontsize=11 "$CLEAN" -o "$PNG"
 
@@ -39,12 +34,6 @@ generate_cfg() {
 
 run_pass() {
     local PASS="$1"
-
-    if [[ ! -v PLUGIN_NAME[$PASS] ]]; then
-        echo "  [!] unknown pass: $PASS"
-        return
-    fi
-
     local PLUGIN="$PROJECT/cmake-build-debug/$PASS/${PLUGIN_NAME[$PASS]}.so"
 
     echo "==> $PASS"
@@ -75,8 +64,8 @@ run_pass() {
         opt --passes="mem2reg" "$DIR/original.ll" -S -o "$BEFORE"
 
         cd "$DIR"
-        generate_cfg "$BEFORE" before
-        generate_cfg optimized.ll after
+        generate_cfg "$BEFORE"
+        generate_cfg optimized.ll
         rm -f "$BEFORE"
         cd "$PROJECT"
     done
