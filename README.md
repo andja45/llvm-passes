@@ -94,7 +94,7 @@ It detects stores to local variables that are overwritten before any intervening
 
 **Tech focus:** LLVM IR, `StoreInst`, `LoadInst`, `CallInst`, `BasicBlock`, `FunctionPass`, memory access analysis.
 
-See [dse/README.md](dse/README.md) for full breakdown.
+See [dse/README.md](dse/README.md) for full breakdown with before/after IR and CFG.
 
 ---
 
