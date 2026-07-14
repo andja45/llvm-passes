@@ -39,6 +39,12 @@ generate_cfg() {
 
 run_pass() {
     local PASS="$1"
+
+    if [[ ! -v PLUGIN_NAME[$PASS] ]]; then
+        echo "  [!] unknown pass: $PASS"
+        return
+    fi
+
     local PLUGIN="$PROJECT/cmake-build-debug/$PASS/${PLUGIN_NAME[$PASS]}.so"
 
     echo "==> $PASS"
