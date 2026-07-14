@@ -1,0 +1,14 @@
+Function: main
+===== CFG =====
+Basic block %entry
+
+===============
+
+Found load between stores
+Store kept because the value is used
+Dead store at end:
+  store i32 0, ptr %retval, align 4
+Dead store at end:
+  store i32 10, ptr %x, align 4
+Deleting:   store i32 0, ptr %retval, align 4
+Deleting:   store i32 10, ptr %x, align 4

@@ -77,13 +77,24 @@ See [simplifycfg/README.md](simplifycfg/README.md) for full breakdown with befor
 
 ---
 
-## [Pass Name] - [one-line description]
+## DSE — Dead Store Elimination
 
-[Brief description of what the pass optimizes and how.]
+Removes redundant memory stores that are overwritten before being used.
+This pass performs a simple dead store elimination on LLVM IR.
+It detects stores to local variables that are overwritten before any intervening use and removes the redundant stores. The implementation also preserves stores that are read before being overwritten or whose addresses are passed to function calls, since their values may be observed externally.
 
-**Tech focus:** [analyses / IR constructs used]
+| Feature | LLVM IR |
+|---------|---------|
+| **Dead store detection** — identify stores whose values are overwritten before being read | StoreInst · LoadInst |
+| **Multiple variable tracking** — track stores independently for different memory locations | StoreInst · AllocaInst · DenseMap |
+| **Load/use checking** — preserve stores when the stored value is read before being overwritten | LoadInst |
+| **Function call handling** — preserve stores when the address of a variable is passed to a function call | CallInst · Value |
+| **End-of-function dead store removal** — remove stores whose values are never used afterwards | StoreInst · Function |
+| **IR transformation** — delete redundant store instructions from LLVM IR | Instruction · BasicBlock |
 
-See [pass-dir/README.md] for full breakdown.
+**Tech focus:** LLVM IR, `StoreInst`, `LoadInst`, `CallInst`, `BasicBlock`, `FunctionPass`, memory access analysis.
+
+See [dse/README.md](dse/README.md) for full breakdown.
 
 ---
 
@@ -137,4 +148,4 @@ opt --load-pass-plugin=./cmake-build-debug/jump-threading/JumpThreading.so \
 | LICM | [Andjela Spasic](https://github.com/andja45) |
 | SimplifyCFG | [Ana Stevanovic](https://github.com/AnaStevanovic) |
 | Jump Threading | [Dunja Milenkovic](https://github.com/DunjaMilenkovic) |
-| [Pass 4] | [[Name]](https://github.com/username) |
+| DSE | [Natalija Pavlicevic](https://github.com/natalijapavlicevic) |

@@ -1,0 +1,12 @@
+Function: main
+===== CFG =====
+Basic block %entry
+
+===============
+
+Dead store candidate:
+  store i32 5, ptr %x, align 4
+Dead store at end:
+  store i32 0, ptr %retval, align 4
+Deleting:   store i32 5, ptr %x, align 4
+Deleting:   store i32 0, ptr %retval, align 4

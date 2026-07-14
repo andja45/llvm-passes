@@ -17,5 +17,6 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS})
 
 add_subdirectory(licm)
+add_subdirectory(dse)
 add_subdirectory(simplifycfg)
 add_subdirectory(jump-threading)

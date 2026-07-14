@@ -8,12 +8,14 @@ declare -A PLUGIN_NAME=(
     [licm]="LICM"
     [simplifycfg]="SimplifyCFG"
     [jump-threading]="JumpThreading"
+    [dse]="DSE"
 )
 
 declare -A OPT_PASSES=(
     [licm]="mem2reg,loop(licm-pass)"
     [simplifycfg]="simplifycfg-pass"
     [jump-threading]="my-jump-threading"
+    [dse]="my-dse"
 )
 
 PASSES=("${!PLUGIN_NAME[@]}")
